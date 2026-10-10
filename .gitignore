@@ -3,3 +3,4 @@
 .cache
 .modcache
 tmp
+.env

@@ -29,7 +29,7 @@
 ## Review Focus
 
 1. **Password outside 8–15 characters, or containing anything other than letters and digits** → 400 `VALIDATION_ERROR` with a specific, byte-free message. Pinned by `TestRegister_PasswordBoundaries` + `TestRegister_PasswordMessages` (Task 2).
-2. **PUT update with identical values** (no-op) → 200 with the resource, not 404/500. Pinned by `TestRepository_Update_NoChange_ReturnsPost` (Task 6).
+2. **PUT update with identical values** (no-op) → 200 with the resource, not 404/500. Pinned by `TestIntegration_UpdateNoChange_ReturnsPost` (Task 9 — the fake-based suites cannot expose the `clientFoundRows` trap, so the pin lives in the integration harness).
 3. **Post deleted between comment existence check and insert** → 404 `NOT_FOUND`, no MySQL error text leaked. Pinned by `TestRepository_MapError` (adapter: 1452 → `ErrPostNotFound`, Task 7) + `TestCreate_FKRace_Propagates` (service propagates the adapter's sentinel unchanged, Task 7).
 4. **JWT tampering and missing claims** — `alg: none`/RS256 → 401 (the algorithm is never taken from the token header); a correctly signed token **without `exp`** → 401 (`jwt.WithExpirationRequired()`); a correctly signed token with garbage/zero/negative `sub` → 401. Pinned by `TestJWT_WrongAlgorithmRejected`, `TestJWT_MissingExpiryRejected`, `TestJWT_InvalidSubjectRejected` (Task 3).
 5. **Concurrent duplicate registration** → 409 `CONFLICT`, not 500. Pinned by `TestRepository_MapError_DuplicateEmail` (Task 4: unit mapping of MySQL 1062 → `ErrEmailTaken`) and `TestIntegration_UserEmailUniqueness` (Task 9: real unique index, real race).
@@ -316,23 +316,28 @@
 ### Task 9: Integration tests, Docker, environment
 
 **Files:**
-- Create: `app/tests/integration/integration_test.go` (env-gated: `TEST_MYSQL_DSN`, `t.Skip` when empty — no build tags)
+- Create: `app/tests/integration/integration_test.go` (env-gated: `TEST_MYSQL_DSN`, `t.Skip` when empty — no build tags; 4 tests, scoped down from 7 by requester decision 2026-10-10)
+- Create: `.dockerignore` (keep `.git`, `.env`, `.service-db`, `.superpowers`, and dev caches out of the build context)
 - Rewrite: `Dockerfile` (multi-stage), `docker-compose.yml`
-- Create: `.env.example` if not already complete (Task 1 creates it; here verify keys)
-- Modify: `.gitignore` (add `.env`)
+- Verify: `.env.example` keys (`APP_PORT`, `DB_DSN`, `JWT_SECRET`, `JWT_TTL`, `MIGRATIONS_DIR` — already complete from Task 1) and `.gitignore` (already contains `.env` — done)
 
 **Interfaces:**
-- Consumes: all repos and `cmd/migrate`.
+- Consumes: all repositories (built on `database.Open` over `TEST_MYSQL_DSN`) and the `cmd/migrate` command, executed as a subprocess — as `package main` it cannot be imported.
 - Produces:
-  - Integration tests: `TestIntegration_MigrateUp_Idempotent`, `TestIntegration_UserEmailUniqueness` (duplicate → `ErrEmailTaken`, Review Focus #5 DB path), `TestIntegration_PostFK_Enforced` (insert with unknown author → FK error), `TestIntegration_CommentCascadeDelete` (delete post → comments gone), `TestIntegration_PostPagination_Order` (seed 25 posts; page 1 returns 10 rows ordered `created_at DESC, id DESC`; total 25), `TestIntegration_UpdateNoChange_ReturnsPost` (Review Focus #2 DB path), `TestIntegration_DeleteZeroRows_ReturnsNotFound` (a delete matching 0 rows → `ErrNotFound`, never a silent success — pins the Task 6 adapter behavior deferred from the unit suite).
-  - Dockerfile: stage 1 `golang:1.27-alpine` — build `./cmd/api` and `./cmd/migrate` to `/out/`; stage 2 slim runtime (e.g. `alpine:3.21`) copying binaries; `EXPOSE 8080`; default `CMD ["/out/api"]`.
-  - docker-compose: `db` (mysql:8.0, `MYSQL_DATABASE=appdb`, credentials from env with dev defaults, healthcheck `mysqladmin ping --silent`, named volume `db_data`), `migrate` (same image, `command: ["/out/migrate"]`, `depends_on: db: condition: service_healthy`), `app` (`command: ["/out/api"]`, `depends_on: migrate: condition: service_completed_successfully`, ports `8080:8080`, env `DB_DSN`, `JWT_SECRET`, `JWT_TTL`, `APP_PORT`). `docker-compose build && docker-compose up` remains the documented workflow.
-  - Note: the previous Air-based live-reload Dockerfile is replaced by the multi-stage build; manual dev uses `go run ./cmd/api` (documented in README).
+  - Integration tests (env-gated, no build tags):
+    - `TestIntegration_MigrateUp_Idempotent` — a `sync.Once` helper applies migrations via `go run ./cmd/migrate` (cwd `app/`, `DB_DSN=TEST_MYSQL_DSN`); the test runs it a second time and asserts the re-run reports `already applied` for all three versions and exits 0, whatever the database's initial state.
+    - `TestIntegration_UserEmailUniqueness` — two `identitymysql` creates with the same email → `identity.ErrEmailTaken` (real unique index / MySQL 1062; Review Focus #5 DB path).
+    - `TestIntegration_UpdateNoChange_ReturnsPost` — an identical title/content through `postsmysql.Update` still returns the persisted row (no `clientFoundRows` trap; Review Focus #2 DB path).
+    - `TestIntegration_DeleteZeroRows_ReturnsNotFound` — a delete matching 0 rows (wrong author or missing id) → `posts.ErrNotFound`, never a silent success (the Task 6 adapter behaviors deferred to this harness).
+    - Test-data hygiene: per-run unique emails (`it-<unixnano>@example.com`) and FK-ordered cleanup (comments → posts → users); tests never rely on shared state or execution order. The dropped `PostFK_Enforced`, `CommentCascadeDelete`, and `PostPagination_Order` cases stay covered by the Task 10 Docker checklist.
+  - Dockerfile: stage 1 `golang:1.27-alpine` — `go mod download` cache layer, then `CGO_ENABLED=0 go build` of `./cmd/api` and `./cmd/migrate` into `/out/`; stage 2 slim runtime (`alpine:3.21`) copying both binaries **and `app/migrations`** (without the SQL files the migrate service cannot run), with `ENV MIGRATIONS_DIR=/app/migrations`, `ENV GIN_MODE=release`, `WORKDIR /app`, `EXPOSE 8080`; default `CMD ["/out/api"]`. Build context is the repo root; `.dockerignore` keeps secrets and dev caches out of the image layers.
+  - docker-compose: `db` (mysql:8.0, `MYSQL_DATABASE=appdb`, credentials from env with dev defaults, `ports: 3333:3306` so host-side integration tests and manual runs can reach it, healthcheck `mysqladmin ping -h 127.0.0.1 --silent`, named volume `db_data`), `migrate` (same image, `command: ["/out/migrate"]`, `depends_on: db: condition: service_healthy`), `app` (`command: ["/out/api"]`, `depends_on: migrate: condition: service_completed_successfully`, ports `8080:8080`, `stop_grace_period: 20s` — longer than the API's 15s drain, env `DB_DSN` (internal `tcp(db:3306)/appdb?parseTime=true`), `JWT_SECRET` (dev default at least 32 characters — `config.Load` rejects shorter), `JWT_TTL`, `APP_PORT`). `docker-compose build && docker-compose up` remains the documented workflow.
+  - Note: the previous Air-based live-reload Dockerfile is replaced by the multi-stage build; manual dev uses `go run ./cmd/api` or `make start` with the root `.env` loaded by `godotenv` (dev only — real deployments set env directly; the `loadDotEnv` hardening remains recorded and deferred).
 
-- [ ] **Step 1: Write failing integration tests** (skip without `TEST_MYSQL_DSN`).
-- [ ] **Step 2: Run them against a MySQL instance.** Run: `cd app && TEST_MYSQL_DSN='...' go test ./tests/integration/... -v` (DSN points at the compose MySQL on `localhost:3333`, or a locally started container). Expected: FAIL first where behavior is unimplemented, then PASS after fixes.
-- [ ] **Step 3: Write Dockerfile + docker-compose.yml; verify `.env.example` keys** (`APP_PORT`, `DB_DSN`, `JWT_SECRET`, `JWT_TTL` — placeholders only).
-- [ ] **Step 4: Build and boot the stack.** Run: `docker-compose build && docker-compose up -d` then `curl localhost:8080/healthz`. Expected: `{"data":{"status":"ok"}}`, `docker-compose ps` shows all three services healthy/completed.
+- [ ] **Step 1: Write the four integration tests** (env-gated: they skip without `TEST_MYSQL_DSN`; with no harness yet the package build-fails first — that is the RED).
+- [ ] **Step 2: Run them against a MySQL instance.** Run: `cd app && TEST_MYSQL_DSN='root:abc123@tcp(127.0.0.1:3333)/appdb?parseTime=true&charset=utf8mb4' go test ./tests/integration/... -v` (the compose `db` on `localhost:3333`, or a locally started container). Expected: PASS — the behaviors already exist; this run verifies the real SQL, driver error mapping, and `RowsAffected` semantics the fake-based suites cannot.
+- [ ] **Step 3: Write Dockerfile, docker-compose.yml, and `.dockerignore`; confirm `.env.example` and `.gitignore` are complete.**
+- [ ] **Step 4: Build and boot the stack.** Run: `docker-compose build && docker-compose up -d` then `curl localhost:8080/healthz`. Expected: `{"data":{"status":"ok"}}`, `docker-compose ps` shows `migrate` exited 0 and `db`/`app` up (healthy).
 - [ ] **Step 5: Review** — no commit (the requester owns git history).
 
 ### Task 10: README, final verification, end-to-end checklist
@@ -359,7 +364,7 @@
   2. Login → 200, usable JWT
   3. POST /posts without token → 401
   4. POST /posts with token → 201
-  5. GET /posts and GET /posts/{id} public → 200
+  5. GET /posts and GET /posts/{id} public → 200; with 2+ posts the list is ordered newest-first (`created_at DESC, id DESC`)
   6. User B cannot PUT/DELETE user A's post → 403
   7. POST /posts/{id}/comments with token → 201 with `author_id` + `author_name` snapshot
   8. Comment without token → 401

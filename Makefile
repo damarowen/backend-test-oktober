@@ -13,7 +13,7 @@ up:
 
 # Start the application with Air live-reload
 start:
-	cd app && air main.go
+	cd app/cmd/api && go run main.go
 
 # Stop the application
 down:
@@ -21,10 +21,6 @@ down:
 
 # Restart the application
 restart: down up
-
-# View application logs
-logs:
-	docker-compose logs -f
 
 # Run Go tests
 test:
@@ -37,4 +33,4 @@ clean:
 
 # Run database migrations
 migrate:
-	@echo "Run migrations here (e.g., mysql -h 127.0.0.1 -P 3333 -u root -pabc123 appdb < migrations/init.sql)"
+	cd app && go run ./cmd/migrate
