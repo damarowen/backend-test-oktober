@@ -3,6 +3,7 @@ package posts
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -121,6 +122,13 @@ func normalizePagination(page, limit int) (int, int, error) {
 		limit = defaultLimit
 	} else if limit < 0 || limit > maxLimit {
 		return 0, 0, invalidf("Limit must be between 1 and %d.", maxLimit)
+	}
+
+	// Keep (page-1)*limit within int64: the adapter passes the offset to
+	// MySQL, and an overflowed OFFSET would surface as an internal error
+	// instead of a client error.
+	if int64(page-1) > math.MaxInt64/int64(limit) {
+		return 0, 0, invalidf("Page is too large.")
 	}
 	return page, limit, nil
 }

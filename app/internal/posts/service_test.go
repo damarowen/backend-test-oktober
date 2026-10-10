@@ -3,6 +3,7 @@ package posts
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -136,6 +137,7 @@ func TestList_InvalidPagination(t *testing.T) {
 		{"negative limit", 1, -5, true, 0, 0},
 		{"zero page defaults", 0, 5, false, 1, 5},
 		{"max limit accepted", 3, 100, false, 3, 100},
+		{"huge page would overflow the offset", math.MaxInt64, 100, true, 0, 0},
 	}
 
 	for _, tt := range tests {
