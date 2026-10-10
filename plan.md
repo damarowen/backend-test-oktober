@@ -152,7 +152,7 @@
     - `GetByEmail` / `GetByID` → `SELECT id, name, email, password_hash, created_at, updated_at FROM users WHERE email = ?` / `WHERE id = ?`.
     - `mapError(err error) error` (unexported, unit-tested without a DB): `*mysql.MySQLError` with `Number == 1062` → `identity.ErrEmailTaken`; `sql.ErrNoRows` → `identity.ErrUserNotFound`; anything else passes through unchanged so a DB outage stays a 500.
     - **Why this mapping is the real guard:** the service's duplicate pre-check has a TOCTOU race, so under concurrent registration only the unique index + 1062 mapping turns the collision into 409 instead of 500.
-  - `identityhttp.NewHandler(svc *identity.Service) *Handler`
+  - `identityhttp.NewHandler(svc *identity.Service, ttl time.Duration) *Handler` — `ttl` is reported as `expires_in` and must be the same `JWT_TTL` the token service is constructed with (single source at wiring in Task 8).
   - `(h *Handler) RegisterAuth(r *gin.RouterGroup)` — registers `POST /register` and `POST /login` (exact paths; pass `r := engine.Group("/")` later in Task 8).
   - Request DTOs decoded with `ShouldBindJSON`; unknown/extra ownership fields are ignored (decode into explicit DTO structs with only expected fields).
   - Responses: register → 201 `{"data": {"id", "name", "email", "created_at"}}` (never `password_hash`); login → 200 `{"data": {"token", "token_type": "Bearer", "expires_in": <seconds>}}`.
@@ -165,7 +165,9 @@
   - `TestRegister_MalformedJSON_Returns400`.
   - `TestRegister_InvalidFields_Returns400_ValidationError`.
   - `TestRegister_DuplicateEmail_Returns409_Conflict`.
-  - `TestLogin_OK_ReturnsToken` — 200, `token_type == "Bearer"`, `expires_in == 86400`.
+  - `TestLogin_OK_ReturnsToken` — 200, `token_type == "Bearer"`, `expires_in == 86400` (the default 24h TTL).
+  - `TestLogin_ExpiresIn_FollowsTTL` — a handler built with a 2h TTL advertises `expires_in == 7200`; pins that the value is derived from the injected TTL, not hardcoded.
+  - `TestLogin_UnhandledError_Returns500_AndLogs` — a non-sentinel service error → generic 500 `INTERNAL_ERROR` (no leaked detail) while the cause is recorded with `slog`.
   - `TestLogin_BadPassword_Returns401_GenericMessage` — message identical to unknown-email case.
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/identity/...` — Expected: FAIL (undefined symbols in the new packages).
 - [ ] **Step 3: Implement `repository.go`** (parameterized SQL only; `Create`/`GetByEmail`/`GetByID` route every error through `mapError`) **and `handler.go`** mapping service errors through `response.FromError`.
