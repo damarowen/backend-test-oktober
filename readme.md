@@ -16,6 +16,10 @@ with JWT authentication, backed by MySQL. The original assignment text lives in
 - `docker-compose up` starts MySQL, applies migrations, and serves the API on
   port 8080.
 
+## Postman Collection
+
+- Collection for manual test is already attached in root
+
 ## Tech Stack
 
 | Component        | Choice                                                        |
