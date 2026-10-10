@@ -1,0 +1,11 @@
+# Build-context hygiene: secrets, VCS data, and dev caches never enter an image
+# layer. The .env file is for host-side development only.
+.env
+.git
+.service-db
+.superpowers
+.cache
+.modcache
+app/.cache
+app/.modcache
+blog-api.postman_collection.json

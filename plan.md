@@ -343,7 +343,9 @@
 ### Task 10: README, final verification, end-to-end checklist
 
 **Files:**
-- Rewrite: `readme.md` (keep as README of record; include all 17 required sections: overview, architecture + dependency direction, modules, folder structure, stack, schema + relationships, endpoints, auth per endpoint, request/response examples, error codes, env setup, Docker instructions, manual setup, migration instructions, test commands, design decisions, scope limitations/future improvements)
+- Rewrite: `readme.md` (README of record, in English; include all 17 required sections: overview, architecture + dependency direction, modules, folder structure, stack, schema + relationships, endpoints, auth per endpoint, request/response examples, error codes, env setup, Docker instructions, manual setup, migration instructions, test commands, design decisions, scope limitations/future improvements)
+- Create: `TASK.md` — the original take-home brief moved verbatim out of `readme.md` before the rewrite (requester decision 2026-10-11: replace the README, never lose the original brief)
+- Modify: `Makefile` — fix the audit findings: define the missing `logs` rule; add `all`/`start` to `.PHONY`; scope `clean` to this project (drop the machine-wide `docker system prune -f`; use `docker-compose down -v` plus a targeted image removal that tolerates a missing image); make `migrate` usable from the repo root via `-include .env` + `export DB_DSN` (make parses the `&` in the DSN safely — shell sourcing would break on it); align `start` to `cd app && go run ./cmd/api` and drop the stale Air comment; add `test-integration` for the env-gated suite against `localhost:3333`.
 
 **Interfaces:**
 - Consumes: everything.
@@ -356,23 +358,28 @@
   - **Trade-offs** — interfaces reduce coupling but switching MySQL→MongoDB is not automatic (schema, queries, integrity testing all change).
   - **Central error mapping** — `response.FromError` is the single transport-layer place that knows every module's sentinels; the dependency direction is transport → domain (domain packages never import `response`). Cost: one case-group per module in one file; if the module count or team boundaries grow, per-module error translation in each adapter is the alternative.
   - **Go toolchain decision** — upgraded 1.21 → 1.27 (latest stable, supported) at requester's direction; upgrade is not dependency-driven; 1.21 is EOL.
+  - **Doc-vs-code accuracy** — every documented claim is checked against the code while writing: exact password wording and validation limits, the strict-pagination rule, the auth-per-endpoint table, error codes/envelopes, env keys and defaults, the compose/migrate flow, Makefile targets, the `TEST_MYSQL_DSN` integration command, `blog-api.postman_collection.json`, and the `godotenv` dev convenience (root `.env`; variables already in the environment always win).
+  - **Makefile** — every declared target has a rule; `clean` touches only this project's containers/volume/image; `start` and `migrate` work from the repo root using the root `.env`; `logs` follows the app; `test-integration` runs the env-gated suite against the compose database on `localhost:3333`.
 
-- [ ] **Step 1: Write the README** per Produces.
-- [ ] **Step 2: Static checks.** Run: `cd app && gofmt -w . && go vet ./... && go test ./... && go build ./...` — inspect the gofmt diff; Expected: all PASS.
+- [ ] **Step 1: Write the README** per Produces and apply the Makefile fixes per Files; before overwriting `readme.md`, move the original brief verbatim to `TASK.md`.
+- [ ] **Step 2: Static checks.** Run: `cd app && gofmt -l . && go vet ./... && go test ./... && go build ./...` — Expected: gofmt prints nothing; vet/build/test all PASS (integration tests skip without `TEST_MYSQL_DSN`). Then verify the Makefile targets: `make test` PASS; `make logs` streams the app logs (Ctrl-C); `make migrate` against the running stack reports `already applied`; `make -n logs test-integration clean` all resolve (no "No rule to make target").
 - [ ] **Step 3: Docker end-to-end checklist** against `docker-compose up` (curl each; report actual results):
   1. Register → 201, no `password_hash` in response
   2. Login → 200, usable JWT
   3. POST /posts without token → 401
   4. POST /posts with token → 201
-  5. GET /posts and GET /posts/{id} public → 200; with 2+ posts the list is ordered newest-first (`created_at DESC, id DESC`)
-  6. User B cannot PUT/DELETE user A's post → 403
-  7. POST /posts/{id}/comments with token → 201 with `author_id` + `author_name` snapshot
-  8. Comment without token → 401
-  9. GET /posts/{id}/comments public → 200, `[]` when empty
-  10. DELETE post → comments cascaded (GET comments after → 404 or empty per spec'd behavior)
-  11. Duplicate register → 409
-  12. No `password_hash`, SQL, or DSN text in any response
+  5. PUT the same post as its owner → 200
+  6. GET /posts and GET /posts/{id} public → 200; with 2+ posts the list is ordered newest-first (`created_at DESC, id DESC`)
+  7. Register + login a second user; user B PUT/DELETE user A's post → 403
+  8. POST /posts/{id}/comments with token → 201 with `author_id` + `author_name` snapshot
+  9. Comment without token → 401
+  10. GET /posts/{id}/comments public → 200, `[]` when empty (list envelope with `pagination`)
+  11. DELETE post → 204; GET /posts/{id}/comments afterwards → 404 `NOT_FOUND`; DB check `SELECT COUNT(*) FROM appdb.comments WHERE post_id = <id>` → 0 (proves real `ON DELETE CASCADE`)
+  12. Duplicate register (same email as item 1) → 409
+  13. GET /healthz → 200 `{"data":{"status":"ok"}}`
+  14. Capture every response during the run; grep for `password_hash`, raw SQL, and DSN leaks → none
 - [ ] **Step 4: Review** — no commit (the requester owns git history).
+- [ ] **Step 5: Final whole-branch review** — fresh reviewer over the full branch (executing-plans review package + Review Focus + ledger rulings); grade findings, ONE fix pass (each fix RED→GREEN), report rulings and deferred minors. No commit.
 
 ---
 

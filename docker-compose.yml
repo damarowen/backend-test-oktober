@@ -1,23 +1,48 @@
 services:
-  app:
-    build:
-      context: .
-    environment:
-      GOMODCACHE: /go/src/app/.modcache
-      GOCACHE: /go/src/app/.cache
-    volumes:
-      - "./app:/go/src/app"
-    ports:
-      - "8080:8080"
-    depends_on:
-      - db
-
   db:
     image: mysql:8.0
     environment:
-      MYSQL_ROOT_PASSWORD: abc123
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-abc123}
       MYSQL_DATABASE: appdb
-    volumes:
-      - "./.service-db:/var/lib/mysql"
     ports:
+      # Published so host-side tools (integration tests, manual API runs) can
+      # reach the same database the stack uses.
       - "3333:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  migrate:
+    build: .
+    image: blog-api
+    command: ["/out/migrate"]
+    environment:
+      DB_DSN: "root:${MYSQL_ROOT_PASSWORD:-abc123}@tcp(db:3306)/appdb?parseTime=true&charset=utf8mb4"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build: .
+    image: blog-api
+    command: ["/out/api"]
+    environment:
+      DB_DSN: "root:${MYSQL_ROOT_PASSWORD:-abc123}@tcp(db:3306)/appdb?parseTime=true&charset=utf8mb4"
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-32-bytes-min}
+      JWT_TTL: ${JWT_TTL:-24h}
+      APP_PORT: "8080"
+    ports:
+      - "8080:8080"
+    # The API drains for up to 15s; give Docker Compose a margin before SIGKILL.
+    stop_grace_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  db_data:
