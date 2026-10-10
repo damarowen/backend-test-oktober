@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"app/internal/identity"
+	"app/internal/posts"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,6 +26,7 @@ const (
 const (
 	MsgValidation   = "The request is invalid."
 	MsgUnauthorized = "Authentication is required."
+	MsgForbidden    = "You do not have permission to perform this action."
 	MsgNotFound     = "The requested resource was not found."
 	MsgConflict     = "The request conflicts with the current state."
 	MsgInternal     = "An internal error occurred."
@@ -77,13 +79,16 @@ func APIError(c *gin.Context, status int, code, message string) {
 // 500 response, and the raw error text is never exposed.
 func FromError(c *gin.Context, err error) bool {
 	switch {
-	case errors.Is(err, identity.ErrInvalidInput):
+	case errors.Is(err, identity.ErrInvalidInput), errors.Is(err, posts.ErrInvalidInput):
 		APIError(c, http.StatusBadRequest, CodeValidation, validationMessage(err))
 		return true
 	case errors.Is(err, identity.ErrInvalidCredentials):
 		APIError(c, http.StatusUnauthorized, CodeUnauthorized, MsgUnauthorized)
 		return true
-	case errors.Is(err, identity.ErrUserNotFound):
+	case errors.Is(err, posts.ErrForbidden):
+		APIError(c, http.StatusForbidden, CodeForbidden, MsgForbidden)
+		return true
+	case errors.Is(err, identity.ErrUserNotFound), errors.Is(err, posts.ErrNotFound):
 		APIError(c, http.StatusNotFound, CodeNotFound, MsgNotFound)
 		return true
 	case errors.Is(err, identity.ErrEmailTaken):
@@ -95,12 +100,18 @@ func FromError(c *gin.Context, err error) bool {
 	}
 }
 
-// validationMessage returns the user-safe text of a ValidationError, or the
-// generic message when the error carries no user-facing wording.
+// validationMessage returns the user-safe text of a ValidationError from any
+// module, or the generic message when the error carries no user-facing wording.
 func validationMessage(err error) string {
-	var ve *identity.ValidationError
-	if errors.As(err, &ve) && ve.Message != "" {
-		return ve.Message
+	var identityErr *identity.ValidationError
+	if errors.As(err, &identityErr) && identityErr.Message != "" {
+		return identityErr.Message
 	}
+
+	var postsErr *posts.ValidationError
+	if errors.As(err, &postsErr) && postsErr.Message != "" {
+		return postsErr.Message
+	}
+
 	return MsgValidation
 }

@@ -85,6 +85,7 @@
 - Produces:
   - `identity.User{ID int64; Name, Email, PasswordHash string; CreatedAt, UpdatedAt time.Time}`
   - Sentinels: `ErrEmailTaken`, `ErrInvalidCredentials`, `ErrUserNotFound`, `ErrInvalidInput` (all `errors.New` with `identity:` prefix).
+  - `identity.ValidationError{Message string}` — user-safe validation message: `Error()` returns `Message`, `Unwrap()` returns `ErrInvalidInput`, so `errors.Is(err, ErrInvalidInput)` still holds while `response.FromError` can surface the wording verbatim. All validation failures are built with an unexported `invalidf` helper.
   - `UserRepository interface { Create(ctx, name, email, passwordHash string) (User, error); GetByEmail(ctx, email string) (User, error); GetByID(ctx, id int64) (User, error) }`
   - `TokenService interface { Issue(userID int64) (string, error); Verify(token string) (int64, error) }`
   - `NewService(repo UserRepository, tokens TokenService) *Service`
@@ -186,6 +187,7 @@
 - Produces:
   - `posts.Post{ID, AuthorID int64; Title, Content string; CreatedAt, UpdatedAt time.Time}`
   - Sentinels: `ErrNotFound`, `ErrForbidden`, `ErrInvalidInput`.
+  - `posts.ValidationError{Message string}` — same contract as `identity.ValidationError`: `Unwrap() → ErrInvalidInput`, with the message surfaced verbatim by `response.FromError` (Task 6). The module never imports a sibling module or `response`.
   - `Repository interface { Create(ctx, authorID int64, title, content string) (Post, error); GetByID(ctx, id int64) (Post, error); List(ctx, page, limit int) ([]Post, int64, error); Update(ctx, id, authorID int64, title, content string) (Post, error); Delete(ctx, id, authorID int64) error }`
   - `NewService(repo Repository) *Service`
   - `(s *Service) Create(ctx, userID int64, title, content string) (Post, error)`
@@ -259,6 +261,8 @@
 - Produces:
   - `comments.Comment{ID, PostID, AuthorID int64; AuthorName, Content string; CreatedAt time.Time}`
   - Sentinels: `ErrPostNotFound`, `ErrInvalidInput`, `ErrAuthorNotFound`, plus `ErrInvalidInput` reused semantics for empty content.
+  - `comments.ValidationError{Message string}` — same contract as the other modules (`Unwrap() → ErrInvalidInput`); the handler surfaces the wording the same way.
+  - **`response.FromError` extension (required before the handler tests can pass):** add the comments sentinels — `comments.ErrPostNotFound`→404, `comments.ErrInvalidInput`→400 (surface the `*comments.ValidationError` message), `comments.ErrAuthorNotFound`→404. Without it, comments 400/404 surface as 500.
   - Small ports (defined here, implemented by existing services — no import cycle):
     - `PostChecker interface { Exists(ctx context.Context, postID int64) (bool, error) }`
     - `UserNameProvider interface { UserName(ctx context.Context, userID int64) (string, error) }`
@@ -313,7 +317,7 @@
 **Interfaces:**
 - Consumes: all repos and `cmd/migrate`.
 - Produces:
-  - Integration tests: `TestIntegration_MigrateUp_Idempotent`, `TestIntegration_UserEmailUniqueness` (duplicate → `ErrEmailTaken`, Review Focus #5 DB path), `TestIntegration_PostFK_Enforced` (insert with unknown author → FK error), `TestIntegration_CommentCascadeDelete` (delete post → comments gone), `TestIntegration_PostPagination_Order` (seed 25 posts; page 1 returns 10 rows ordered `created_at DESC, id DESC`; total 25), `TestIntegration_UpdateNoChange_ReturnsPost` (Review Focus #2 DB path).
+  - Integration tests: `TestIntegration_MigrateUp_Idempotent`, `TestIntegration_UserEmailUniqueness` (duplicate → `ErrEmailTaken`, Review Focus #5 DB path), `TestIntegration_PostFK_Enforced` (insert with unknown author → FK error), `TestIntegration_CommentCascadeDelete` (delete post → comments gone), `TestIntegration_PostPagination_Order` (seed 25 posts; page 1 returns 10 rows ordered `created_at DESC, id DESC`; total 25), `TestIntegration_UpdateNoChange_ReturnsPost` (Review Focus #2 DB path), `TestIntegration_DeleteZeroRows_ReturnsNotFound` (a delete matching 0 rows → `ErrNotFound`, never a silent success — pins the Task 6 adapter behavior deferred from the unit suite).
   - Dockerfile: stage 1 `golang:1.27-alpine` — build `./cmd/api` and `./cmd/migrate` to `/out/`; stage 2 slim runtime (e.g. `alpine:3.21`) copying binaries; `EXPOSE 8080`; default `CMD ["/out/api"]`.
   - docker-compose: `db` (mysql:8.0, `MYSQL_DATABASE=appdb`, credentials from env with dev defaults, healthcheck `mysqladmin ping --silent`, named volume `db_data`), `migrate` (same image, `command: ["/out/migrate"]`, `depends_on: db: condition: service_healthy`), `app` (`command: ["/out/api"]`, `depends_on: migrate: condition: service_completed_successfully`, ports `8080:8080`, env `DB_DSN`, `JWT_SECRET`, `JWT_TTL`, `APP_PORT`). `docker-compose build && docker-compose up` remains the documented workflow.
   - Note: the previous Air-based live-reload Dockerfile is replaced by the multi-stage build; manual dev uses `go run ./cmd/api` (documented in README).
@@ -338,6 +342,7 @@
   - **Pagination and indexes** — query patterns served by `idx_posts_created_id (created_at, id)` and `idx_comments_post_created_id (post_id, created_at, id)`.
   - **Architecture** — modular monolith + pragmatic hexagonal; why not microservices.
   - **Trade-offs** — interfaces reduce coupling but switching MySQL→MongoDB is not automatic (schema, queries, integrity testing all change).
+  - **Central error mapping** — `response.FromError` is the single transport-layer place that knows every module's sentinels; the dependency direction is transport → domain (domain packages never import `response`). Cost: one case-group per module in one file; if the module count or team boundaries grow, per-module error translation in each adapter is the alternative.
   - **Go toolchain decision** — upgraded 1.21 → 1.27 (latest stable, supported) at requester's direction; upgrade is not dependency-driven; 1.21 is EOL.
 
 - [ ] **Step 1: Write the README** per Produces.

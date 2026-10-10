@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"app/internal/identity"
+	"app/internal/posts"
 
 	"github.com/gin-gonic/gin"
 )
@@ -54,6 +55,9 @@ func TestFromError_MapsSentinels(t *testing.T) {
 		{"credentials", identity.ErrInvalidCredentials, http.StatusUnauthorized, "UNAUTHORIZED"},
 		{"user not found", identity.ErrUserNotFound, http.StatusNotFound, "NOT_FOUND"},
 		{"email taken", identity.ErrEmailTaken, http.StatusConflict, "CONFLICT"},
+		{"posts validation", posts.ErrInvalidInput, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"posts forbidden", posts.ErrForbidden, http.StatusForbidden, "FORBIDDEN"},
+		{"posts not found", posts.ErrNotFound, http.StatusNotFound, "NOT_FOUND"},
 	}
 
 	for _, tt := range tests {
@@ -81,6 +85,20 @@ func TestFromError_ValidationMessage_Surfaced(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(body), "byte") {
 		t.Errorf("body %q must not use byte wording", body)
+	}
+}
+
+// TestFromError_PostsValidationMessage_Surfaced pins that a posts validation
+// error reaches the client with its specific wording, not the generic message.
+func TestFromError_PostsValidationMessage_Surfaced(t *testing.T) {
+	want := "Title is required."
+	status, body := run(t, &posts.ValidationError{Message: want})
+
+	if status != http.StatusBadRequest {
+		t.Errorf("status: got %d, want %d", status, http.StatusBadRequest)
+	}
+	if msg := decodeError(t, body).Error.Message; msg != want {
+		t.Errorf("message: got %q, want %q", msg, want)
 	}
 }
 
