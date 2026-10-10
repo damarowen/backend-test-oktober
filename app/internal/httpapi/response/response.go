@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 
+	"app/internal/comments"
 	"app/internal/identity"
 	"app/internal/posts"
 
@@ -79,7 +80,7 @@ func APIError(c *gin.Context, status int, code, message string) {
 // 500 response, and the raw error text is never exposed.
 func FromError(c *gin.Context, err error) bool {
 	switch {
-	case errors.Is(err, identity.ErrInvalidInput), errors.Is(err, posts.ErrInvalidInput):
+	case errors.Is(err, identity.ErrInvalidInput), errors.Is(err, posts.ErrInvalidInput), errors.Is(err, comments.ErrInvalidInput):
 		APIError(c, http.StatusBadRequest, CodeValidation, validationMessage(err))
 		return true
 	case errors.Is(err, identity.ErrInvalidCredentials):
@@ -88,7 +89,8 @@ func FromError(c *gin.Context, err error) bool {
 	case errors.Is(err, posts.ErrForbidden):
 		APIError(c, http.StatusForbidden, CodeForbidden, MsgForbidden)
 		return true
-	case errors.Is(err, identity.ErrUserNotFound), errors.Is(err, posts.ErrNotFound):
+	case errors.Is(err, identity.ErrUserNotFound), errors.Is(err, posts.ErrNotFound),
+		errors.Is(err, comments.ErrPostNotFound), errors.Is(err, comments.ErrAuthorNotFound):
 		APIError(c, http.StatusNotFound, CodeNotFound, MsgNotFound)
 		return true
 	case errors.Is(err, identity.ErrEmailTaken):
@@ -111,6 +113,11 @@ func validationMessage(err error) string {
 	var postsErr *posts.ValidationError
 	if errors.As(err, &postsErr) && postsErr.Message != "" {
 		return postsErr.Message
+	}
+
+	var commentsErr *comments.ValidationError
+	if errors.As(err, &commentsErr) && commentsErr.Message != "" {
+		return commentsErr.Message
 	}
 
 	return MsgValidation

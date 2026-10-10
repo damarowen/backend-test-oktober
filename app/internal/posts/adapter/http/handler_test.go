@@ -108,7 +108,7 @@ func newTestRouter(t *testing.T) (*gin.Engine, *fakeRepo) {
 	return r, repo
 }
 
-func request(t *testing.T, r *gin.Engine, method, path, body string, authed bool) *httptest.ResponseRecorder {
+func doRequest(t *testing.T, r *gin.Engine, method, path, body string, authed bool) *httptest.ResponseRecorder {
 	t.Helper()
 
 	var reader io.Reader
@@ -171,7 +171,7 @@ func decodeBody[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 func TestCreatePost_NoAuth_Returns401(t *testing.T) {
 	r, _ := newTestRouter(t)
 
-	rec := request(t, r, http.MethodPost, "/posts", `{"title":"Hello","content":"Body"}`, false)
+	rec := doRequest(t, r, http.MethodPost, "/posts", `{"title":"Hello","content":"Body"}`, false)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d, want 401 (body: %s)", rec.Code, rec.Body.String())
@@ -182,7 +182,7 @@ func TestCreatePost_Authenticated_Returns201_AuthorFromToken(t *testing.T) {
 	r, repo := newTestRouter(t)
 
 	// author_id in the body must be ignored: the author comes from the token.
-	rec := request(t, r, http.MethodPost, "/posts",
+	rec := doRequest(t, r, http.MethodPost, "/posts",
 		`{"title":"Hello","content":"Body","author_id":999}`, true)
 
 	if rec.Code != http.StatusCreated {
@@ -207,7 +207,7 @@ func TestCreatePost_Authenticated_Returns201_AuthorFromToken(t *testing.T) {
 func TestCreatePost_InvalidBody_Returns400(t *testing.T) {
 	r, _ := newTestRouter(t)
 
-	rec := request(t, r, http.MethodPost, "/posts", `{"title":"   ","content":"Body"}`, true)
+	rec := doRequest(t, r, http.MethodPost, "/posts", `{"title":"   ","content":"Body"}`, true)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -221,7 +221,7 @@ func TestGetPost_Found_Returns200(t *testing.T) {
 	r, repo := newTestRouter(t)
 	seed := repo.seed(1, "Hello", "Body")
 
-	rec := request(t, r, http.MethodGet, fmt.Sprintf("/posts/%d", seed.ID), "", false)
+	rec := doRequest(t, r, http.MethodGet, fmt.Sprintf("/posts/%d", seed.ID), "", false)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
@@ -235,7 +235,7 @@ func TestGetPost_Found_Returns200(t *testing.T) {
 func TestGetPost_Missing_Returns404(t *testing.T) {
 	r, _ := newTestRouter(t)
 
-	rec := request(t, r, http.MethodGet, "/posts/999", "", false)
+	rec := doRequest(t, r, http.MethodGet, "/posts/999", "", false)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status: got %d, want 404 (body: %s)", rec.Code, rec.Body.String())
@@ -250,7 +250,7 @@ func TestGetPost_InvalidID_Returns400(t *testing.T) {
 
 	for _, path := range []string{"/posts/abc", "/posts/0", "/posts/-1"} {
 		t.Run(path, func(t *testing.T) {
-			rec := request(t, r, http.MethodGet, path, "", false)
+			rec := doRequest(t, r, http.MethodGet, path, "", false)
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status: got %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 			}
@@ -263,7 +263,7 @@ func TestListPosts_DefaultPagination(t *testing.T) {
 	repo.seed(1, "A", "a")
 	repo.seed(1, "B", "b")
 
-	rec := request(t, r, http.MethodGet, "/posts", "", false)
+	rec := doRequest(t, r, http.MethodGet, "/posts", "", false)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
@@ -280,7 +280,7 @@ func TestListPosts_DefaultPagination(t *testing.T) {
 func TestListPosts_Empty_ReturnsEmptyArray(t *testing.T) {
 	r, _ := newTestRouter(t)
 
-	rec := request(t, r, http.MethodGet, "/posts", "", false)
+	rec := doRequest(t, r, http.MethodGet, "/posts", "", false)
 
 	env := decodeBody[listEnvelope](t, rec)
 	if env.Data == nil {
@@ -294,7 +294,7 @@ func TestListPosts_Empty_ReturnsEmptyArray(t *testing.T) {
 func TestListPosts_ExplicitPagination_Echoed(t *testing.T) {
 	r, _ := newTestRouter(t)
 
-	rec := request(t, r, http.MethodGet, "/posts?page=2&limit=5", "", false)
+	rec := doRequest(t, r, http.MethodGet, "/posts?page=2&limit=5", "", false)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
@@ -308,7 +308,7 @@ func TestListPosts_ExplicitPagination_Echoed(t *testing.T) {
 func TestListPosts_LimitOver100_Returns400(t *testing.T) {
 	r, _ := newTestRouter(t)
 
-	rec := request(t, r, http.MethodGet, "/posts?limit=101", "", false)
+	rec := doRequest(t, r, http.MethodGet, "/posts?limit=101", "", false)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -328,7 +328,7 @@ func TestListPosts_PresentPaginationOutOfRange_Returns400(t *testing.T) {
 
 	for _, query := range tests {
 		t.Run(query, func(t *testing.T) {
-			rec := request(t, r, http.MethodGet, "/posts"+query, "", false)
+			rec := doRequest(t, r, http.MethodGet, "/posts"+query, "", false)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status: got %d, want 400 (body: %s)", rec.Code, rec.Body.String())
@@ -344,7 +344,7 @@ func TestUpdatePost_ByOwner_Returns200(t *testing.T) {
 	r, repo := newTestRouter(t)
 	seed := repo.seed(tokenUser, "Old", "Old body")
 
-	rec := request(t, r, http.MethodPut, fmt.Sprintf("/posts/%d", seed.ID),
+	rec := doRequest(t, r, http.MethodPut, fmt.Sprintf("/posts/%d", seed.ID),
 		`{"title":"New","content":"New body"}`, true)
 
 	if rec.Code != http.StatusOK {
@@ -363,7 +363,7 @@ func TestUpdatePost_ByOtherUser_Returns403(t *testing.T) {
 	r, repo := newTestRouter(t)
 	seed := repo.seed(7, "Old", "Old body")
 
-	rec := request(t, r, http.MethodPut, fmt.Sprintf("/posts/%d", seed.ID),
+	rec := doRequest(t, r, http.MethodPut, fmt.Sprintf("/posts/%d", seed.ID),
 		`{"title":"Hijacked","content":"Hijacked body"}`, true)
 
 	if rec.Code != http.StatusForbidden {
@@ -380,7 +380,7 @@ func TestUpdatePost_ByOtherUser_Returns403(t *testing.T) {
 func TestUpdatePost_Missing_Returns404(t *testing.T) {
 	r, _ := newTestRouter(t)
 
-	rec := request(t, r, http.MethodPut, "/posts/999", `{"title":"New","content":"New body"}`, true)
+	rec := doRequest(t, r, http.MethodPut, "/posts/999", `{"title":"New","content":"New body"}`, true)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status: got %d, want 404 (body: %s)", rec.Code, rec.Body.String())
@@ -391,7 +391,7 @@ func TestDeletePost_ByOwner_Returns204(t *testing.T) {
 	r, repo := newTestRouter(t)
 	seed := repo.seed(tokenUser, "Title", "Body")
 
-	rec := request(t, r, http.MethodDelete, fmt.Sprintf("/posts/%d", seed.ID), "", true)
+	rec := doRequest(t, r, http.MethodDelete, fmt.Sprintf("/posts/%d", seed.ID), "", true)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status: got %d, want 204 (body: %s)", rec.Code, rec.Body.String())
@@ -408,7 +408,7 @@ func TestDeletePost_ByOtherUser_Returns403(t *testing.T) {
 	r, repo := newTestRouter(t)
 	seed := repo.seed(7, "Title", "Body")
 
-	rec := request(t, r, http.MethodDelete, fmt.Sprintf("/posts/%d", seed.ID), "", true)
+	rec := doRequest(t, r, http.MethodDelete, fmt.Sprintf("/posts/%d", seed.ID), "", true)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status: got %d, want 403 (body: %s)", rec.Code, rec.Body.String())

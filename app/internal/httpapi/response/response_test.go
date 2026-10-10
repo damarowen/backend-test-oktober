@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"app/internal/comments"
 	"app/internal/identity"
 	"app/internal/posts"
 
@@ -58,6 +59,9 @@ func TestFromError_MapsSentinels(t *testing.T) {
 		{"posts validation", posts.ErrInvalidInput, http.StatusBadRequest, "VALIDATION_ERROR"},
 		{"posts forbidden", posts.ErrForbidden, http.StatusForbidden, "FORBIDDEN"},
 		{"posts not found", posts.ErrNotFound, http.StatusNotFound, "NOT_FOUND"},
+		{"comments validation", comments.ErrInvalidInput, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"comments post not found", comments.ErrPostNotFound, http.StatusNotFound, "NOT_FOUND"},
+		{"comments author not found", comments.ErrAuthorNotFound, http.StatusNotFound, "NOT_FOUND"},
 	}
 
 	for _, tt := range tests {
@@ -93,6 +97,20 @@ func TestFromError_ValidationMessage_Surfaced(t *testing.T) {
 func TestFromError_PostsValidationMessage_Surfaced(t *testing.T) {
 	want := "Title is required."
 	status, body := run(t, &posts.ValidationError{Message: want})
+
+	if status != http.StatusBadRequest {
+		t.Errorf("status: got %d, want %d", status, http.StatusBadRequest)
+	}
+	if msg := decodeError(t, body).Error.Message; msg != want {
+		t.Errorf("message: got %q, want %q", msg, want)
+	}
+}
+
+// TestFromError_CommentsValidationMessage_Surfaced pins that a comments
+// validation error reaches the client with its specific wording.
+func TestFromError_CommentsValidationMessage_Surfaced(t *testing.T) {
+	want := "Content is required."
+	status, body := run(t, &comments.ValidationError{Message: want})
 
 	if status != http.StatusBadRequest {
 		t.Errorf("status: got %d, want %d", status, http.StatusBadRequest)

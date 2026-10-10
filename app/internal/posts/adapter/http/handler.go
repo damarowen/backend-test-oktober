@@ -4,13 +4,11 @@
 package postshttp
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
-	"app/internal/httpapi/middleware"
+	"app/internal/httpapi/request"
 	"app/internal/httpapi/response"
 	"app/internal/posts"
 
@@ -67,7 +65,7 @@ func newPostResponse(p posts.Post) postResponse {
 }
 
 func (h *Handler) create(c *gin.Context) {
-	userID, ok := userID(c)
+	userID, ok := request.UserID(c)
 	if !ok {
 		return
 	}
@@ -87,7 +85,7 @@ func (h *Handler) create(c *gin.Context) {
 }
 
 func (h *Handler) get(c *gin.Context) {
-	id, ok := postID(c)
+	id, ok := request.PostID(c)
 	if !ok {
 		return
 	}
@@ -101,7 +99,7 @@ func (h *Handler) get(c *gin.Context) {
 }
 
 func (h *Handler) list(c *gin.Context) {
-	page, limit, ok := pagination(c)
+	page, limit, ok := request.Pagination(c)
 	if !ok {
 		return
 	}
@@ -120,11 +118,11 @@ func (h *Handler) list(c *gin.Context) {
 }
 
 func (h *Handler) update(c *gin.Context) {
-	userID, ok := userID(c)
+	userID, ok := request.UserID(c)
 	if !ok {
 		return
 	}
-	id, ok := postID(c)
+	id, ok := request.PostID(c)
 	if !ok {
 		return
 	}
@@ -144,11 +142,11 @@ func (h *Handler) update(c *gin.Context) {
 }
 
 func (h *Handler) delete(c *gin.Context) {
-	userID, ok := userID(c)
+	userID, ok := request.UserID(c)
 	if !ok {
 		return
 	}
-	id, ok := postID(c)
+	id, ok := request.PostID(c)
 	if !ok {
 		return
 	}
@@ -158,66 +156,6 @@ func (h *Handler) delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
-}
-
-// userID reads the authenticated user placed in the context by the auth
-// middleware. The route wiring guarantees it on every write route; the
-// fallback only fires if a protected route is ever registered without auth.
-func userID(c *gin.Context) (int64, bool) {
-	id, ok := middleware.UserID(c)
-	if !ok {
-		response.APIError(c, http.StatusUnauthorized, response.CodeUnauthorized, response.MsgUnauthorized)
-		return 0, false
-	}
-	return id, true
-}
-
-// postID parses the :id path parameter as a positive int64. A non-numeric or
-// non-positive value is a client error, not a 404.
-func postID(c *gin.Context) (int64, bool) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || id < 1 {
-		response.APIError(c, http.StatusBadRequest, response.CodeValidation, "Post ID must be a positive integer.")
-		return 0, false
-	}
-	return id, true
-}
-
-// pagination reads ?page and ?limit under the strict presence rule: an absent
-// parameter gets the API default, while a present one must be an integer in
-// range. Silently defaulting an explicitly supplied value would hide a client
-// bug and contradict the documented contract.
-func pagination(c *gin.Context) (page, limit int, ok bool) {
-	const (
-		defaultPage  = 1
-		defaultLimit = 10
-		maxLimit     = 100
-	)
-
-	page, limit = defaultPage, defaultLimit
-	q := c.Request.URL.Query()
-
-	if q.Has("page") {
-		n, err := strconv.Atoi(q.Get("page"))
-		if err != nil || n < 1 {
-			response.APIError(c, http.StatusBadRequest, response.CodeValidation,
-				fmt.Sprintf("Page must be at least %d.", defaultPage))
-			return 0, 0, false
-		}
-		page = n
-	}
-
-	if q.Has("limit") {
-		n, err := strconv.Atoi(q.Get("limit"))
-		if err != nil || n < 1 || n > maxLimit {
-			response.APIError(c, http.StatusBadRequest, response.CodeValidation,
-				fmt.Sprintf("Limit must be between 1 and %d.", maxLimit))
-			return 0, 0, false
-		}
-		limit = n
-	}
-
-	return page, limit, true
 }
 
 // fail maps a service error to its HTTP response. An unrecognised error still

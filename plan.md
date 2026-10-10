@@ -30,7 +30,7 @@
 
 1. **Password outside 8–15 characters, or containing anything other than letters and digits** → 400 `VALIDATION_ERROR` with a specific, byte-free message. Pinned by `TestRegister_PasswordBoundaries` + `TestRegister_PasswordMessages` (Task 2).
 2. **PUT update with identical values** (no-op) → 200 with the resource, not 404/500. Pinned by `TestRepository_Update_NoChange_ReturnsPost` (Task 6).
-3. **Post deleted between comment existence check and insert** → 404 `NOT_FOUND`, no MySQL error text leaked. Pinned by `TestService_Create_FKRace_MapsToPostNotFound` (Task 7).
+3. **Post deleted between comment existence check and insert** → 404 `NOT_FOUND`, no MySQL error text leaked. Pinned by `TestRepository_MapError` (adapter: 1452 → `ErrPostNotFound`, Task 7) + `TestCreate_FKRace_Propagates` (service propagates the adapter's sentinel unchanged, Task 7).
 4. **JWT tampering and missing claims** — `alg: none`/RS256 → 401 (the algorithm is never taken from the token header); a correctly signed token **without `exp`** → 401 (`jwt.WithExpirationRequired()`); a correctly signed token with garbage/zero/negative `sub` → 401. Pinned by `TestJWT_WrongAlgorithmRejected`, `TestJWT_MissingExpiryRejected`, `TestJWT_InvalidSubjectRejected` (Task 3).
 5. **Concurrent duplicate registration** → 409 `CONFLICT`, not 500. Pinned by `TestRepository_MapError_DuplicateEmail` (Task 4: unit mapping of MySQL 1062 → `ErrEmailTaken`) and `TestIntegration_UserEmailUniqueness` (Task 9: real unique index, real race).
 6. **401 must abort the Gin chain** — an unauthenticated request must never reach a protected handler; writing 401 without `c.Abort()` is not enough. Pinned by `TestAuth_Failure_AbortsChain` (Task 3).
@@ -226,7 +226,7 @@
   - **`response.FromError` extension (required before the handler tests can pass):** add the posts sentinels to the central mapper — `posts.ErrInvalidInput`→400 (surface the `*posts.ValidationError` message when present, so `validationMessage` must recognise that type too), `posts.ErrForbidden`→403 (add the missing `MsgForbidden` constant to the response package), `posts.ErrNotFound`→404. Extend `TestFromError_*` in the response package with the posts cases. Without this, posts 404/403/400 surface as 500 (`INTERNAL_ERROR`).
   - **No-op update decision:** when `Update` reports 0 rows affected, re-`SELECT` **scoped by id and author_id** (`WHERE id = ? AND author_id = ?`): row found → return it (update changed nothing); no row → `ErrNotFound`. The read-back is author-scoped exactly like the update itself, so the 0-row path can never return a post belonging to a different author. Do not require `clientFoundRows`.
   - `postshttp.NewHandler(svc *posts.Service) *Handler`
-  - `(h *Handler) Register(r *gin.RouterGroup, auth gin.HandlerFunc)` — `POST /posts` and `PUT/DELETE /posts/:id` behind `auth`; `GET /posts`, `GET /posts/:id` public. Query `?page=&limit=` parsed with `strconv` under the strict presence rule: a parameter that is **present** must parse as an integer and satisfy `page ≥ 1`, `1 ≤ limit ≤ 100`, otherwise 400 `VALIDATION_ERROR`; only an **absent** parameter is passed as 0 and defaulted by the service (`?limit=0`, `?page=-1`, `?page=abc` are all 400).
+  - `(h *Handler) Register(r *gin.RouterGroup, auth gin.HandlerFunc)` — `POST /posts` and `PUT/DELETE /posts/:id` behind `auth`; `GET /posts`, `GET /posts/:id` public. Query `?page=&limit=` parsed under the strict presence rule: a **present** parameter must be an integer in range (`page ≥ 1`, `1 ≤ limit ≤ 100`) else 400 `VALIDATION_ERROR`; **absent** parameters default to 1/10 in the handler, so the response pagination metadata echoes the effective values (`?limit=0`, `?page=-1`, `?page=abc` are all 400). Parsing is delegated to the shared `httpapi/request` package (Task 7 extraction).
   - Responses: create → 201; get → 200; list → 200 paginated; update → 200 with updated resource; delete → 204 (no body).
 
 - [ ] **Step 1: Write failing tests:**
@@ -252,8 +252,9 @@
 
 **Files:**
 - Create: `app/internal/comments/model.go`, `errors.go`, `ports.go`, `service.go`
-- Create: `app/internal/comments/adapter/mysql/repository.go`
+- Create: `app/internal/comments/adapter/mysql/repository.go`, `app/internal/comments/adapter/mysql/repository_test.go`
 - Create: `app/internal/comments/adapter/http/handler.go`
+- Create: `app/internal/httpapi/request/request.go`, `app/internal/httpapi/request/request_test.go` (shared parsing extracted here — see Produces)
 - Test: `app/internal/comments/service_test.go`, `fake_test.go`, `app/internal/comments/adapter/http/handler_test.go`
 
 **Interfaces:**
@@ -262,24 +263,29 @@
   - `comments.Comment{ID, PostID, AuthorID int64; AuthorName, Content string; CreatedAt time.Time}`
   - Sentinels: `ErrPostNotFound`, `ErrInvalidInput`, `ErrAuthorNotFound`, plus `ErrInvalidInput` reused semantics for empty content.
   - `comments.ValidationError{Message string}` — same contract as the other modules (`Unwrap() → ErrInvalidInput`); the handler surfaces the wording the same way.
-  - **`response.FromError` extension (required before the handler tests can pass):** add the comments sentinels — `comments.ErrPostNotFound`→404, `comments.ErrInvalidInput`→400 (surface the `*comments.ValidationError` message), `comments.ErrAuthorNotFound`→404. Without it, comments 400/404 surface as 500.
+  - **`response.FromError` extension (required before the handler tests can pass):** add the comments sentinels — `comments.ErrPostNotFound`→404, `comments.ErrInvalidInput`→400 (surface the `*comments.ValidationError` message), `comments.ErrAuthorNotFound`→404 (the authenticated user's row is missing; 404 avoids leaking internal state and is unreachable in practice — there is no user-deletion endpoint). Without it, comments 400/404 surface as 500.
+  - **Shared request parsing (extraction; also a Task 6 revision):** new package `httpapi/request` — `Pagination(c) (page, limit int, ok bool)` (the Global Constraints strict presence rule and its exact messages, as the single source of truth), `PostID(c) (int64, bool)` (positive-int64 `:id`; both route families parse a post ID), `UserID(c) (int64, bool)` (authenticated user, 401 fallback). `postshttp` is refactored to delegate to these; its existing handler tests are the extraction's regression proof. `request_test.go` is the canonical strict-rule table, so comments needs no duplicate strict-pagination test.
   - Small ports (defined here, implemented by existing services — no import cycle):
     - `PostChecker interface { Exists(ctx context.Context, postID int64) (bool, error) }`
     - `UserNameProvider interface { UserName(ctx context.Context, userID int64) (string, error) }`
   - `Repository interface { Create(ctx, c Comment) (Comment, error); ListByPost(ctx, postID int64, page, limit int) ([]Comment, int64, error) }`
+  - `commentsmysql.NewRepository(db *sql.DB) *Repository` (implements the port above) — `Create` inserts `post_id, author_id, author_name, content` + re-select; `ListByPost` `WHERE post_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?` + `COUNT(*)`; `mapError`: **MySQL 1452 → `comments.ErrPostNotFound`** (the post vanished between the service's existence check and the insert), all other errors unchanged — the domain stays MySQL-free.
   - `NewService(repo Repository, posts PostChecker, users UserNameProvider) *Service`
-  - `(s *Service) Create(ctx, postID, authorID int64, content string) (Comment, error)` — validate content; `posts.Exists` → `ErrPostNotFound`; `users.UserName` → `ErrAuthorNotFound`; store snapshot `AuthorName`. MySQL 1452 from repo (post deleted in the race window) → `ErrPostNotFound` (Review Focus #3).
+  - `(s *Service) Create(ctx, postID, authorID int64, content string) (Comment, error)` — trim, then validate content (trimmed non-empty, ≤ 65,535 bytes; **store the trimmed text**); `posts.Exists` → `ErrPostNotFound`; `users.UserName` → `ErrAuthorNotFound`; store snapshot `AuthorName`. Repo errors propagate unchanged — the adapter maps the insert's post-FK violation (MySQL 1452, post deleted in the race window) to `ErrPostNotFound` (Review Focus #3); the service never sees MySQL codes.
   - `(s *Service) ListByPost(ctx, postID int64, page, limit int) ([]Comment, int64, error)` — post missing → `ErrPostNotFound`; empty slice (not nil in JSON — must marshal `[]`) when no comments; same pagination rules as posts (service: 0 = not supplied → defaults; the HTTP list handler applies the Task 6 strict presence rule — present params out of range → 400); order `created_at DESC, id DESC` in the adapter.
 
 - [ ] **Step 1: Write failing tests:**
-  - `TestCreate_Success` — stored comment has `AuthorID` from args, `AuthorName` from `UserNameProvider` (request-supplied names impossible by construction — handler DTO has only `content`).
+  - `TestCreate_Success` — stored comment has `AuthorID` from args, `AuthorName` from `UserNameProvider` (request-supplied names impossible by construction — handler DTO has only `content`), and `Content` stored trimmed.
   - `TestCreate_InvalidContent` (table) — empty, whitespace-only, > 65,535 bytes → `ErrInvalidInput`.
   - `TestCreate_PostNotFound` — `PostChecker` returns false → `ErrPostNotFound`.
-  - `TestCreate_FKRace_MapsToPostNotFound` — repo returns a FK-violation error → `ErrPostNotFound`, and the error message surfaced to clients never contains "Error 1452" (Review Focus #3).
+  - `TestCreate_AuthorNotFound` — `UserNameProvider` returns `ErrUserNotFound` → `ErrAuthorNotFound` (the mapping is otherwise unpinned).
+  - `TestCreate_FKRace_Propagates` — the fake repo returns `comments.ErrPostNotFound` (what the adapter produces when the post vanishes between the existence check and the insert) → the service propagates it unchanged, so the handler answers 404; no MySQL text can reach a client (Review Focus #3, service side).
+  - `TestRepository_MapError` (table, adapter) — MySQL 1452 → `comments.ErrPostNotFound`; unrelated errors pass through unchanged (Review Focus #3, adapter side; mirrors Tasks 4/6).
+  - `request_test.go` — canonical strict-pagination table (absent → 1/10; `?page=0`, `?limit=0`, `?page=-1`, `?limit=101`, non-numeric → 400) plus the `PostID` positive-int64 table; posts' existing `TestListPosts_PresentPaginationOutOfRange_Returns400` stays as the integration guard.
   - `TestListByPost_PostNotFound`, `TestListByPost_Empty` (returns empty slice, total 0), `TestListByPost_Defaults`.
-  - HTTP: `TestCreateComment_NoAuth_Returns401`, `TestCreateComment_InvalidBody_IgnoresAuthorFields_Returns201WithTokenAuthor`, `TestCreateComment_MissingPost_Returns404`, `TestListComments_OK_ReturnsAuthorIDAndName`, `TestListComments_MissingPost_Returns404`.
+  - HTTP: `TestCreateComment_NoAuth_Returns401`, `TestCreateComment_ExtraAuthorFields_Ignored_Returns201WithTokenAuthor` (a body carrying `author_id`/`author_name` is ignored; the response author is the token user and the name is the provider snapshot), `TestCreateComment_EmptyContent_Returns400`, `TestCreateComment_MissingPost_Returns404`, `TestListComments_OK_ReturnsAuthorIDAndName`, `TestListComments_MissingPost_Returns404`, `TestListComments_Empty_ReturnsEmptyArray` (`data: []`, never null).
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/comments/...` — Expected: FAIL.
-- [ ] **Step 3: Implement comments domain, MySQL adapter (`Create` inserts `post_id, author_id, author_name, content`; `ListByPost` selects with `WHERE post_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?` + count), and handler (`POST /posts/:id/comments`, `GET /posts/:id/comments`; create behind `auth`, list public).**
+- [ ] **Step 3: Implement the comments domain; the MySQL adapter (`Create` inserts `post_id, author_id, author_name, content` + re-select; `ListByPost` `WHERE post_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?` + count; `mapError` 1452 → `ErrPostNotFound`); the shared `httpapi/request` package with the `postshttp` delegation refactor; and the handler (`POST /posts/:id/comments` behind `auth`, `GET /posts/:id/comments` public, both using `request.PostID`/`request.Pagination`).**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/comments/... -v` — Expected: PASS.
 - [ ] **Step 5: Review** — no commit (the requester owns git history).
 
@@ -287,22 +293,23 @@
 
 **Files:**
 - Create: `app/internal/httpapi/router.go`, `app/internal/httpapi/router_test.go`
-- Rewrite: `app/cmd/api/main.go` (replaces the Hello World starter; preserve nothing but the `:8080` port)
-- Delete: `app/main.go` (superseded by `cmd/api`)
+- Create: `app/cmd/api/main.go` (the file does not exist yet; the Hello World starter is the file deleted below)
+- Delete: `app/main.go` (Hello World starter; superseded by `cmd/api`)
 
 **Interfaces:**
 - Consumes: everything from Tasks 2–7 plus `config`, `database`.
 - Produces:
-  - `httpapi.NewRouter(h Handlers, auth gin.HandlerFunc) *gin.Engine` with `type Handlers struct { Identity *identityhttp.Handler; Posts *postshttp.Handler; Comments *commentshttp.Handler }` — wires exact public paths, `GET /healthz` (200 `{"data":{"status":"ok"}}`; 503 when `db.PingContext` fails), JSON 404 handler returning the error envelope, and `gin.Logger`/`gin.Recovery`.
+  - `httpapi.NewRouter(h Handlers, auth gin.HandlerFunc, db Pinger) *gin.Engine` with `type Handlers struct { Identity *identityhttp.Handler; Posts *postshttp.Handler; Comments *commentshttp.Handler }` and `type Pinger interface { PingContext(ctx context.Context) error }` (satisfied by `*sql.DB`, stubbable in tests). Wires exact public paths, `GET /healthz` (200 `{"data":{"status":"ok"}}`; 503 with the error envelope when the ping fails), JSON 404 handler returning the error envelope, and `gin.Logger`/`gin.Recovery`.
   - `cmd/api/main.go` lifecycle: `config.Load` → `database.Open` → build services/adapters (manual DI, explicit and linear) → `httpapi.NewRouter` → `http.Server` with `ReadHeaderTimeout: 5s` → `signal.NotifyContext` for SIGINT/SIGTERM → graceful `srv.Shutdown(ctx)` with 15s drain → `db.Close()`. Startup failures exit non-zero with clear messages.
 
-- [ ] **Step 1: Write failing httptest tests** (`router_test.go` builds the full router with real services over in-test fakes):
-  - `TestRouter_RouteRegistration` (table): every required method+path returns non-404 for a well-formed request (or 401 where protected).
+- [ ] **Step 1: Write failing httptest tests** (`router_test.go` builds the full router with real services over in-test fakes and a stub `Pinger`):
+  - `TestRouter_RouteRegistration` (table): every required method+path returns non-404 for a well-formed request (or 401 where protected). **Seed the fakes** so `GET /posts/1` and `GET /posts/1/comments` return 200 — an unseeded resource returns the same `NOT_FOUND` envelope as an unregistered route, which would fail the table for the wrong reason.
   - `TestHealthz_OK`.
+  - `TestHealthz_DBPingFails_Returns503` — stub pinger returns an error → 503 with the error envelope.
   - `TestUnknownRoute_ReturnsErrorEnvelope` — JSON contains `error.code`.
   - `TestProtectedRoutes_MissingToken_Returns401` (table over POST /posts, PUT/DELETE /posts/1, POST /posts/1/comments).
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/httpapi/...` — Expected: FAIL.
-- [ ] **Step 3: Implement `router.go` and rewrite `cmd/api/main.go`; delete `app/main.go`.**
+- [ ] **Step 3: Implement `router.go`; create `cmd/api/main.go`; delete `app/main.go`.**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./... -v` — Expected: PASS, full suite green.
 - [ ] **Step 5: Review** — no commit (the requester owns git history).
 
