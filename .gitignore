@@ -3,3 +3,5 @@
 .cache
 .modcache
 tmp
+.env
+plan.md
