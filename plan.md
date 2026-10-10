@@ -31,8 +31,9 @@
 1. **Password outside 8–15 characters, or containing anything other than letters and digits** → 400 `VALIDATION_ERROR` with a specific, byte-free message. Pinned by `TestRegister_PasswordBoundaries` + `TestRegister_PasswordMessages` (Task 2).
 2. **PUT update with identical values** (no-op) → 200 with the resource, not 404/500. Pinned by `TestRepository_Update_NoChange_ReturnsPost` (Task 6).
 3. **Post deleted between comment existence check and insert** → 404 `NOT_FOUND`, no MySQL error text leaked. Pinned by `TestService_Create_FKRace_MapsToPostNotFound` (Task 7).
-4. **JWT with `alg: none` or RS256** → 401, signature algorithm never taken from the token header. Pinned by `TestJWT_WrongAlgorithmRejected` (Task 3).
+4. **JWT tampering and missing claims** — `alg: none`/RS256 → 401 (the algorithm is never taken from the token header); a correctly signed token **without `exp`** → 401 (`jwt.WithExpirationRequired()`); a correctly signed token with garbage/zero/negative `sub` → 401. Pinned by `TestJWT_WrongAlgorithmRejected`, `TestJWT_MissingExpiryRejected`, `TestJWT_InvalidSubjectRejected` (Task 3).
 5. **Concurrent duplicate registration** → 409 `CONFLICT`, not 500. Pinned by `TestRepository_MapError_DuplicateEmail` (Task 4: unit mapping of MySQL 1062 → `ErrEmailTaken`) and `TestIntegration_UserEmailUniqueness` (Task 9: real unique index, real race).
+6. **401 must abort the Gin chain** — an unauthenticated request must never reach a protected handler; writing 401 without `c.Abort()` is not enough. Pinned by `TestAuth_Failure_AbortsChain` (Task 3).
 
 ---
 
@@ -114,21 +115,24 @@
 **Interfaces:**
 - Consumes: `identity.TokenService` (Task 2).
 - Produces:
-  - `identity.NewJWT(secret string, ttl time.Duration) *JWT` implementing `TokenService`. Claims: `jwt.RegisteredClaims` with `Subject` = decimal user ID, `ExpiresAt` = now+ttl, `IssuedAt`; parse with `jwt.WithValidMethods([]string{"HS256"})`. No logging of tokens.
+  - `identity.NewJWT(secret string, ttl time.Duration) *JWT` implementing `TokenService`. Claims: `jwt.RegisteredClaims` with `Subject` = decimal user ID, `ExpiresAt` = now+ttl, `IssuedAt`; HS256. **Verification is strict:** parse with `jwt.WithValidMethods([]string{"HS256"})` **and** `jwt.WithExpirationRequired()` — a signed token with no `exp` must be rejected. After parsing, validate `Subject`: `strconv.ParseInt` must succeed and the value must be **> 0**; missing/garbage/zero/negative → error. No logging of tokens.
   - `response.Data(c *gin.Context, status int, data any)` → `{"data": ...}`
   - `response.Paginated(c *gin.Context, data any, page, limit int, total int64)` → `{"data": ..., "pagination": {...}}`
   - `response.APIError(c *gin.Context, status int, code, message string)` → `{"error": {...}}`
   - `response.FromError(c *gin.Context, err error) bool` — maps module sentinels (`ErrInvalidInput`→400, `ErrInvalidCredentials`/auth errors→401, `ErrForbidden`→403, `ErrNotFound`/`ErrUserNotFound`/`ErrPostNotFound`→404, `ErrEmailTaken`→409, else→500 `INTERNAL_ERROR` with generic message). Returns false for unhandled errors. For `ErrInvalidInput`, the error message is surfaced to the client: when `errors.As` yields an `identity.ValidationError`, its `Message` is used verbatim; otherwise the generic `The request is invalid.` is used. No other error ever exposes its raw text.
-  - `middleware.Auth(tokens identity.TokenService) gin.HandlerFunc` — reads `Authorization: Bearer <token>`, verifies, stores user ID under typed unexported key; 401 `UNAUTHORIZED` on any failure.
+  - `middleware.Auth(tokens identity.TokenService) gin.HandlerFunc` — reads `Authorization: Bearer <token>`, verifies, stores user ID under typed unexported key. **Every failure path must abort the Gin chain** (`c.AbortWithStatusJSON(401, …)` or `c.Abort()` then `return`) so the protected handler never runs: missing header, wrong scheme, malformed/invalid/expired token, or a non-positive user ID. Only the success path calls `c.Next()`.
   - `middleware.UserID(c *gin.Context) (int64, bool)` — the only way to read the authenticated ID.
 
 - [ ] **Step 1: Write failing tests:**
   - `TestJWT_IssueAndVerify_RoundTrip` — `Verify(Issue(42)) == 42`.
   - `TestJWT_ExpiredTokenRejected` — `NewJWT(secret, -1*time.Minute)`; Verify → error.
+  - `TestJWT_MissingExpiryRejected` — hand-craft a token signed with the correct secret but **no `exp`**; Verify → error (Review Focus #4).
+  - `TestJWT_InvalidSubjectRejected` (table) — `Subject` = `""`, `"abc"`, `"0"`, `"-1"` on correctly signed tokens; Verify → error.
   - `TestJWT_TamperedSignatureRejected`.
   - `TestJWT_WrongAlgorithmRejected` — hand-craft an `alg: none` and an RS256 token; Verify → error (Review Focus #4).
-  - `response_test.go`: `TestFromError_MapsSentinels` (table-driven over every sentinel → expected status/code), `TestFromError_Unknown_Returns500Generic` (message must not contain the raw error text).
+  - `response_test.go`: `TestFromError_MapsSentinels` (table-driven over every sentinel → expected status/code), `TestFromError_ValidationMessage_Surfaced` (a `*identity.ValidationError` message reaches the body verbatim), `TestFromError_Unknown_Returns500Generic` (message must not contain the raw error text).
   - `TestAuth_MissingHeader_Returns401`, `TestAuth_MalformedHeader_Returns401`, `TestAuth_InvalidToken_Returns401`, `TestAuth_ValidToken_SetsUserID` (uses `middleware.UserID`).
+  - `TestAuth_Failure_AbortsChain` (table: header missing, wrong scheme, invalid token, valid signature with non-positive `sub`) — asserts status 401 **and** that the protected handler was never executed (flag set inside the handler must stay false) (Review Focus #6).
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/identity/... ./internal/httpapi/...` — Expected: FAIL, undefined symbols.
 - [ ] **Step 3: Implement `jwt.go`, `response/response.go`, `middleware/auth.go`.**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/identity/... ./internal/httpapi/... -v` — Expected: PASS.
