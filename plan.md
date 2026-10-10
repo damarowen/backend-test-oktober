@@ -16,7 +16,7 @@
 - Public API paths exactly: `POST /register`, `POST /login`, `POST /posts`, `GET /posts`, `GET /posts/{id}`, `PUT /posts/{id}`, `DELETE /posts/{id}`, `POST /posts/{id}/comments`, `GET /posts/{id}/comments`, `GET /healthz`. Gin uses `:id` internally; public paths unchanged.
 - Response envelopes — single: `{"data": {...}}`; list: `{"data": [...], "pagination": {"page": 1, "limit": 10, "total": 0}}`; error: `{"error": {"code": "VALIDATION_ERROR", "message": "The request is invalid."}}`.
 - Error codes → status: `VALIDATION_ERROR`→400, `UNAUTHORIZED`→401, `FORBIDDEN`→403, `NOT_FOUND`→404, `CONFLICT`→409, `INTERNAL_ERROR`→500. Never leak SQL, DSNs, hashes, or stack traces.
-- Validation limits: name trimmed non-empty ≤ 50 chars; email valid ≤ 50 chars; password **8–15 characters, letters and digits only (`[A-Za-z0-9]`)**; title trimmed non-empty ≤ 255 chars; post/comment content non-empty ≤ 65,535 bytes (fits `TEXT`); IDs positive int64; pagination: missing → `page=1, limit=10`, explicitly out of range (page < 1, limit < 1 or > 100) → 400.
+- Validation limits: name trimmed non-empty ≤ 50 chars; email valid ≤ 50 chars; password **8–15 characters, letters and digits only (`[A-Za-z0-9]`)**; title trimmed non-empty ≤ 255 chars; post/comment content non-empty ≤ 65,535 bytes (fits `TEXT`); IDs positive int64; pagination: absent → `page=1, limit=10`; a **present** `page`/`limit` must be an integer in range (`page ≥ 1`, `1 ≤ limit ≤ 100`) or the request is 400 `VALIDATION_ERROR` — `?limit=0` and `?page=0` are out of range and must be rejected, never silently defaulted (**requester decision, Option B**).
 - Error wording: end-user messages never use technical units ("bytes") or internal detail. Password messages are `Password must be at least 8 characters.`, `Password must be at most 15 characters.`, `Password can only contain letters and numbers.`
 - Email normalization: `strings.TrimSpace` + `strings.ToLower`, applied identically at register and login. DB unique index is the real guarantee.
 - JWT: HS256 only (reject other algs), `sub` = user ID, expiry `JWT_TTL` (default 24h), secret from env only (required, ≥ 32 chars). Tokens and passwords never logged.
@@ -34,6 +34,7 @@
 4. **JWT tampering and missing claims** — `alg: none`/RS256 → 401 (the algorithm is never taken from the token header); a correctly signed token **without `exp`** → 401 (`jwt.WithExpirationRequired()`); a correctly signed token with garbage/zero/negative `sub` → 401. Pinned by `TestJWT_WrongAlgorithmRejected`, `TestJWT_MissingExpiryRejected`, `TestJWT_InvalidSubjectRejected` (Task 3).
 5. **Concurrent duplicate registration** → 409 `CONFLICT`, not 500. Pinned by `TestRepository_MapError_DuplicateEmail` (Task 4: unit mapping of MySQL 1062 → `ErrEmailTaken`) and `TestIntegration_UserEmailUniqueness` (Task 9: real unique index, real race).
 6. **401 must abort the Gin chain** — an unauthenticated request must never reach a protected handler; writing 401 without `c.Abort()` is not enough. Pinned by `TestAuth_Failure_AbortsChain` (Task 3).
+7. **Present-but-invalid pagination** — `?page=0`, `?limit=0`, `?page=-1`, `?limit=101`, and non-numeric values → 400 `VALIDATION_ERROR`; only absent parameters default to 1/10. Pinned by `TestListPosts_PresentPaginationOutOfRange_Returns400` (Task 6); the service-level 0-means-unset rule by `TestList_InvalidPagination` (Task 5).
 
 ---
 
@@ -189,7 +190,7 @@
   - `NewService(repo Repository) *Service`
   - `(s *Service) Create(ctx, userID int64, title, content string) (Post, error)`
   - `(s *Service) Get(ctx, id int64) (Post, error)`
-  - `(s *Service) List(ctx, page, limit int) ([]Post, int64, error)` — `normalizePagination(page, limit) (int, int, error)`: 0 → defaults 1/10, out of range → `ErrInvalidInput`.
+  - `(s *Service) List(ctx, page, limit int) ([]Post, int64, error)` — `normalizePagination(page, limit) (int, int, error)`: 0 means "not supplied" → defaults 1/10 (the HTTP layer only passes 0 for an absent query parameter), negative or > 100 → `ErrInvalidInput`.
   - `(s *Service) Update(ctx, userID, id int64, title, content string) (Post, error)` — full update of title+content; ownership check (missing → `ErrNotFound`, other author → `ErrForbidden`); author never changes.
   - `(s *Service) Delete(ctx, userID, id int64) error` — same ownership rules.
   - `(s *Service) Exists(ctx, id int64) (bool, error)` — satisfies comments' `PostChecker` port (Task 7).
@@ -199,7 +200,7 @@
   - `TestCreate_InvalidInput` (table) — empty/whitespace title, title > 255, empty content, content > 65,535 bytes → `ErrInvalidInput`.
   - `TestGet_NotFound` — `ErrNotFound`.
   - `TestList_Defaults` — `List(ctx, 0, 0)` calls repo with page=1, limit=10.
-  - `TestList_InvalidPagination` (table) — `(-1, 10)`, `(1, 0-)`→default ok, `(1, 101)`, `(1, -5)` → `ErrInvalidInput` for out-of-range only (Review Focus check for limits).
+  - `TestList_InvalidPagination` (table) — `(-1, 10)`, `(1, 101)`, `(1, -5)` → `ErrInvalidInput` and the repo is never called; `(0, 0)` and `(1, 0)` → defaults 1/10 (0 = "not supplied" at the service boundary; strict HTTP-side validation is Task 6).
   - `TestUpdate_ByOwner_Succeeds` — author ID unchanged.
   - `TestUpdate_ByAnotherUser_Forbidden` — `ErrForbidden` (Review: 403 not 404).
   - `TestUpdate_NotFound`.
@@ -219,14 +220,16 @@
 **Interfaces:**
 - Consumes: `posts.Repository` port (Task 5), `response`, `middleware` (Task 3).
 - Produces:
-  - `postsmysql.NewRepository(db *sql.DB) *Repository` implementing `posts.Repository`. Queries: `Create` `INSERT INTO posts (title, content, author_id) VALUES (?,?,?)` + re-select; `GetByID`; `List` with `SELECT ... ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?` + `SELECT COUNT(*) FROM posts`; `Update` `UPDATE posts SET title=?, content=? WHERE id=? AND author_id=?`; `Delete` `DELETE FROM posts WHERE id=? AND author_id=?`.
-  - **No-op update decision:** when `Update` reports 0 rows affected, re-`SELECT` by id: row found → return it (update changed nothing); not found → `ErrNotFound`. Do not require `clientFoundRows`.
+  - `postsmysql.NewRepository(db *sql.DB) *Repository` implementing `posts.Repository`. Queries: `Create` `INSERT INTO posts (title, content, author_id) VALUES (?,?,?)` + re-select; `GetByID`; `List` with `SELECT ... ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?` + `SELECT COUNT(*) FROM posts`; `Update` `UPDATE posts SET title=?, content=? WHERE id=? AND author_id=?`; `Delete` `DELETE FROM posts WHERE id=? AND author_id=?` — **inspect `RowsAffected` and return `ErrNotFound` when 0**: a 0-row delete is not a MySQL error, so without this check the adapter returns nil and the API would answer 204 for a deletion that never happened (e.g. the post is removed concurrently after the service's ownership check).
+  - **`response.FromError` extension (required before the handler tests can pass):** add the posts sentinels to the central mapper — `posts.ErrInvalidInput`→400 (surface the `*posts.ValidationError` message when present, so `validationMessage` must recognise that type too), `posts.ErrForbidden`→403 (add the missing `MsgForbidden` constant to the response package), `posts.ErrNotFound`→404. Extend `TestFromError_*` in the response package with the posts cases. Without this, posts 404/403/400 surface as 500 (`INTERNAL_ERROR`).
+  - **No-op update decision:** when `Update` reports 0 rows affected, re-`SELECT` **scoped by id and author_id** (`WHERE id = ? AND author_id = ?`): row found → return it (update changed nothing); no row → `ErrNotFound`. The read-back is author-scoped exactly like the update itself, so the 0-row path can never return a post belonging to a different author. Do not require `clientFoundRows`.
   - `postshttp.NewHandler(svc *posts.Service) *Handler`
-  - `(h *Handler) Register(r *gin.RouterGroup, auth gin.HandlerFunc)` — `POST /posts` and `PUT/DELETE /posts/:id` behind `auth`; `GET /posts`, `GET /posts/:id` public. Query `?page=&limit=` parsed with `strconv`.
+  - `(h *Handler) Register(r *gin.RouterGroup, auth gin.HandlerFunc)` — `POST /posts` and `PUT/DELETE /posts/:id` behind `auth`; `GET /posts`, `GET /posts/:id` public. Query `?page=&limit=` parsed with `strconv` under the strict presence rule: a parameter that is **present** must parse as an integer and satisfy `page ≥ 1`, `1 ≤ limit ≤ 100`, otherwise 400 `VALIDATION_ERROR`; only an **absent** parameter is passed as 0 and defaulted by the service (`?limit=0`, `?page=-1`, `?page=abc` are all 400).
   - Responses: create → 201; get → 200; list → 200 paginated; update → 200 with updated resource; delete → 204 (no body).
 
 - [ ] **Step 1: Write failing tests:**
   - `TestRepository_Update_NoChange_ReturnsPost` — fake `sql` driver or stubbed affected-rows=0 path returns the row (Review Focus #2). If driving this through `database/sql` stubs is disproportionate, pin the decision with a driver-level test against the integration harness in Task 9 instead — but the behavior must be pinned by a named test somewhere.
+  - `TestRepository_Delete_ZeroRows_ReturnsNotFound` — a delete matching 0 rows (missing post or another author) → `ErrNotFound`, never a silent success. Same mechanism decision as the no-op update test: driver-level if practical, otherwise pinned against the Task 9 integration harness.
   - `TestRepository_MapError` (table): unrelated MySQL errors pass through unchanged, so an insert with a bad `author_id` surfaces as an error rather than being misreported as a business condition. (Identity's 1062 mapping — Review Focus #5 — is pinned in Task 4; comments' 1452 → `ErrPostNotFound` mapping is pinned in Task 7.)
   - HTTP (httptest, real `posts.Service` over a fake repo):
     - `TestCreatePost_NoAuth_Returns401`
@@ -235,10 +238,11 @@
     - `TestGetPost_Found_Returns200` / `TestGetPost_Missing_Returns404` / `TestGetPost_InvalidID_Returns400`
     - `TestListPosts_DefaultPagination` — response `pagination == {page:1, limit:10, total:<n>}`.
     - `TestListPosts_LimitOver100_Returns400`
+    - `TestListPosts_PresentPaginationOutOfRange_Returns400` (table) — `?page=0`, `?limit=0`, `?page=-1`, `?page=abc`, `?limit=abc` → 400 while absent params still return `{page:1, limit:10}` (requester decision, Option B; Review Focus #7).
     - `TestUpdatePost_ByOtherUser_Returns403`, `TestUpdatePost_Missing_Returns404`, `TestUpdatePost_ByOwner_Returns200`
     - `TestDeletePost_ByOwner_Returns204`, `TestDeletePost_ByOtherUser_Returns403`
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/posts/adapter/...` — Expected: FAIL.
-- [ ] **Step 3: Implement `repository.go` and `handler.go`.**
+- [ ] **Step 3: Implement `repository.go` and `handler.go`, and extend `response.FromError` with the posts sentinels (see Interfaces) — the handler tests cannot pass until 404/403/400 map correctly.**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/posts/... -v` — Expected: PASS.
 - [ ] **Step 5: Review** — no commit (the requester owns git history).
 
@@ -261,7 +265,7 @@
   - `Repository interface { Create(ctx, c Comment) (Comment, error); ListByPost(ctx, postID int64, page, limit int) ([]Comment, int64, error) }`
   - `NewService(repo Repository, posts PostChecker, users UserNameProvider) *Service`
   - `(s *Service) Create(ctx, postID, authorID int64, content string) (Comment, error)` — validate content; `posts.Exists` → `ErrPostNotFound`; `users.UserName` → `ErrAuthorNotFound`; store snapshot `AuthorName`. MySQL 1452 from repo (post deleted in the race window) → `ErrPostNotFound` (Review Focus #3).
-  - `(s *Service) ListByPost(ctx, postID int64, page, limit int) ([]Comment, int64, error)` — post missing → `ErrPostNotFound`; empty slice (not nil in JSON — must marshal `[]`) when no comments; same pagination rules as posts; order `created_at DESC, id DESC` in the adapter.
+  - `(s *Service) ListByPost(ctx, postID int64, page, limit int) ([]Comment, int64, error)` — post missing → `ErrPostNotFound`; empty slice (not nil in JSON — must marshal `[]`) when no comments; same pagination rules as posts (service: 0 = not supplied → defaults; the HTTP list handler applies the Task 6 strict presence rule — present params out of range → 400); order `created_at DESC, id DESC` in the adapter.
 
 - [ ] **Step 1: Write failing tests:**
   - `TestCreate_Success` — stored comment has `AuthorID` from args, `AuthorName` from `UserNameProvider` (request-supplied names impossible by construction — handler DTO has only `content`).
