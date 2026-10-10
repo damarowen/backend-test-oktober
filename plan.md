@@ -16,22 +16,23 @@
 - Public API paths exactly: `POST /register`, `POST /login`, `POST /posts`, `GET /posts`, `GET /posts/{id}`, `PUT /posts/{id}`, `DELETE /posts/{id}`, `POST /posts/{id}/comments`, `GET /posts/{id}/comments`, `GET /healthz`. Gin uses `:id` internally; public paths unchanged.
 - Response envelopes — single: `{"data": {...}}`; list: `{"data": [...], "pagination": {"page": 1, "limit": 10, "total": 0}}`; error: `{"error": {"code": "VALIDATION_ERROR", "message": "The request is invalid."}}`.
 - Error codes → status: `VALIDATION_ERROR`→400, `UNAUTHORIZED`→401, `FORBIDDEN`→403, `NOT_FOUND`→404, `CONFLICT`→409, `INTERNAL_ERROR`→500. Never leak SQL, DSNs, hashes, or stack traces.
-- Validation limits: name trimmed non-empty ≤ 100 chars; email valid ≤ 255 chars; password **8–72 bytes** (reject > 72, never truncate — bcrypt limit); title trimmed non-empty ≤ 255 chars; post/comment content non-empty ≤ 65,535 bytes (fits `TEXT`); IDs positive int64; pagination: missing → `page=1, limit=10`, explicitly out of range (page < 1, limit < 1 or > 100) → 400.
+- Validation limits: name trimmed non-empty ≤ 50 chars; email valid ≤ 50 chars; password **8–15 characters, letters and digits only (`[A-Za-z0-9]`)**; title trimmed non-empty ≤ 255 chars; post/comment content non-empty ≤ 65,535 bytes (fits `TEXT`); IDs positive int64; pagination: missing → `page=1, limit=10`, explicitly out of range (page < 1, limit < 1 or > 100) → 400.
+- Error wording: end-user messages never use technical units ("bytes") or internal detail. Password messages are `Password must be at least 8 characters.`, `Password must be at most 15 characters.`, `Password can only contain letters and numbers.`
 - Email normalization: `strings.TrimSpace` + `strings.ToLower`, applied identically at register and login. DB unique index is the real guarantee.
 - JWT: HS256 only (reject other algs), `sub` = user ID, expiry `JWT_TTL` (default 24h), secret from env only (required, ≥ 32 chars). Tokens and passwords never logged.
 - Auth policy: public = register, login, get/list posts, list comments. Auth required = create post, update/delete post, create comment. Update/delete enforce ownership in service **and** SQL (`WHERE id = ? AND author_id = ?`): 404 if missing, 403 if owned by another user.
 - `comments.author_id` is a **deliberate entity extension** (documented); `author_name` is a server-side snapshot from Identity at creation time — never taken from the request body.
 - SQL: parameterized statements only. Explicit SQL, no ORM. Migrations applied by `cmd/migrate` (runs before the API in Docker Compose), tracked in `schema_migrations`.
 - Scope exclusions (do NOT implement): frontend, Redis, Kafka/RabbitMQ, microservices, CQRS, event sourcing, likes/tags/categories, social login, email verification, password reset, admin dashboard, profile update endpoints, soft delete, generic repositories, DI frameworks.
-- **Commits:** the requester manages git history. Do NOT commit per task — leave changes in the working tree and report them.
+- **Commits:** the requester manages git history. Do NOT commit per task — leave changes in the working tree and report them. This rule supersedes the per-task `Commit` steps below: do not run them; end each task with a review instead.
 
 ## Review Focus
 
-1. **Password > 72 bytes** → 400 `VALIDATION_ERROR`, never silently truncated by bcrypt. Pinned by `TestService_Register_PasswordTooLong` (Task 2).
+1. **Password outside 8–15 characters, or containing anything other than letters and digits** → 400 `VALIDATION_ERROR` with a specific, byte-free message. Pinned by `TestRegister_PasswordBoundaries` + `TestRegister_PasswordMessages` (Task 2).
 2. **PUT update with identical values** (no-op) → 200 with the resource, not 404/500. Pinned by `TestRepository_Update_NoChange_ReturnsPost` (Task 6).
 3. **Post deleted between comment existence check and insert** → 404 `NOT_FOUND`, no MySQL error text leaked. Pinned by `TestService_Create_FKRace_MapsToPostNotFound` (Task 7).
 4. **JWT with `alg: none` or RS256** → 401, signature algorithm never taken from the token header. Pinned by `TestJWT_WrongAlgorithmRejected` (Task 3).
-5. **Concurrent duplicate registration** → 409 `CONFLICT`, not 500. Pinned by `TestRepository_Create_DuplicateEmail_MapsToErrEmailTaken` (Task 6/9 integration: `TestIntegration_UserEmailUniqueness`).
+5. **Concurrent duplicate registration** → 409 `CONFLICT`, not 500. Pinned by `TestRepository_MapError_DuplicateEmail` (Task 4: unit mapping of MySQL 1062 → `ErrEmailTaken`) and `TestIntegration_UserEmailUniqueness` (Task 9: real unique index, real race).
 
 ---
 
@@ -63,12 +64,13 @@
 - [ ] **Step 4: Implement `config.go` and `database/mysql.go`** to the Produces signatures.
 - [ ] **Step 5: Write the migrations** (utf8mb4, InnoDB, `BIGINT` signed PKs):
   - `users(id BIGINT AUTO_INCREMENT PK, name VARCHAR(100) NOT NULL, email VARCHAR(255) NOT NULL, password_hash VARCHAR(255) NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY uq_users_email (email))`
+    - Requester decision: application-level validation caps name and email at **50 characters** (`maxNameLength`/`maxEmailLength`), stricter than the column widths above. The columns keep their wider capacity as harmless slack; the app is the enforcing gate. Tightening the columns to `VARCHAR(50)` is optional and would need a fresh database or an `ALTER`.
   - `posts(id BIGINT PK AI, title VARCHAR(255) NOT NULL, content TEXT NOT NULL, author_id BIGINT NOT NULL, created_at/updated_at as above, CONSTRAINT fk_posts_author FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE RESTRICT, KEY idx_posts_author (author_id), KEY idx_posts_created_id (created_at, id))`
   - `comments(id BIGINT PK AI, post_id BIGINT NOT NULL, author_id BIGINT NOT NULL, author_name VARCHAR(100) NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT fk_comments_post FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE, CONSTRAINT fk_comments_author FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE RESTRICT, KEY idx_comments_post_created_id (post_id, created_at, id))`
   - `.down.sql` files drop in reverse order.
 - [ ] **Step 6: Implement `cmd/migrate/main.go`** (up-only runner described in Produces; clear startup errors; `os.Exit(1)` on failure).
 - [ ] **Step 7: Verify.** Run: `cd app && gofmt -w . && go vet ./... && go test ./... && go build ./...` — Expected: all PASS.
-- [ ] **Step 8: Commit** `feat: foundation — config, database platform, migrations, migrate command`.
+- [ ] **Step 8: Review** — no commit (the requester owns git history).
 
 ### Task 2: Identity service — registration and login logic
 
@@ -90,8 +92,9 @@
 
 - [ ] **Step 1: Write failing tests** (`fake_test.go` holds an in-memory `UserRepository` fake and a stub `TokenService`):
   - `TestRegister_Success` — returned user's `Email` is lowercased/trimmed ("  Budi@Example.COM " → "budi@example.com"), `PasswordHash != password`, `bcrypt.CompareHashAndPassword` succeeds.
-  - `TestRegister_InvalidInput` (table-driven) — empty name, name > 100 chars, invalid email, email > 255 chars, password < 8 bytes → `ErrInvalidInput`.
-  - `TestRegister_PasswordTooLong` — 73-byte password → `ErrInvalidInput` (Review Focus #1).
+  - `TestRegister_InvalidInput` (table-driven) — empty name, name > 50 chars, invalid email, email > 50 chars, empty/short password, 16-char password, password with symbol/space/non-ASCII → `ErrInvalidInput`.
+  - `TestRegister_PasswordBoundaries` — 7 chars fail, 8 pass, 15 pass, 16 fail.
+  - `TestRegister_PasswordMessages` — exact user-facing strings, and asserts no message contains "byte".
   - `TestRegister_DuplicateEmail` — fake returns `ErrEmailTaken` → surfaces `ErrEmailTaken`.
   - `TestLogin_Success` — returns the stub token.
   - `TestLogin_WrongPassword` and `TestLogin_UnknownEmail` — both `ErrInvalidCredentials` (identical error, no user enumeration).
@@ -99,7 +102,7 @@
 - [ ] **Step 2: Run tests to verify they fail.** Run: `cd app && go test ./internal/identity/...` — Expected: FAIL, undefined symbols.
 - [ ] **Step 3: Implement `model.go`, `errors.go`, `ports.go`, `service.go`** to the Produces signatures. Email normalization in one private helper used by both Register and Login.
 - [ ] **Step 4: Run tests to verify they pass.** Run: `cd app && go test ./internal/identity/... -v` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(identity): registration and login service with bcrypt and validation`.
+- [ ] **Step 5: Review** — no commit (the requester owns git history).
 
 ### Task 3: JWT, response envelope, auth middleware
 
@@ -115,7 +118,7 @@
   - `response.Data(c *gin.Context, status int, data any)` → `{"data": ...}`
   - `response.Paginated(c *gin.Context, data any, page, limit int, total int64)` → `{"data": ..., "pagination": {...}}`
   - `response.APIError(c *gin.Context, status int, code, message string)` → `{"error": {...}}`
-  - `response.FromError(c *gin.Context, err error) bool` — maps module sentinels (`ErrInvalidInput`→400, `ErrInvalidCredentials`/auth errors→401, `ErrForbidden`→403, `ErrNotFound`/`ErrUserNotFound`/`ErrPostNotFound`→404, `ErrEmailTaken`→409, else→500 `INTERNAL_ERROR` with generic message). Returns false for unhandled errors.
+  - `response.FromError(c *gin.Context, err error) bool` — maps module sentinels (`ErrInvalidInput`→400, `ErrInvalidCredentials`/auth errors→401, `ErrForbidden`→403, `ErrNotFound`/`ErrUserNotFound`/`ErrPostNotFound`→404, `ErrEmailTaken`→409, else→500 `INTERNAL_ERROR` with generic message). Returns false for unhandled errors. For `ErrInvalidInput`, the error message is surfaced to the client: when `errors.As` yields an `identity.ValidationError`, its `Message` is used verbatim; otherwise the generic `The request is invalid.` is used. No other error ever exposes its raw text.
   - `middleware.Auth(tokens identity.TokenService) gin.HandlerFunc` — reads `Authorization: Bearer <token>`, verifies, stores user ID under typed unexported key; 401 `UNAUTHORIZED` on any failure.
   - `middleware.UserID(c *gin.Context) (int64, bool)` — the only way to read the authenticated ID.
 
@@ -129,32 +132,41 @@
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/identity/... ./internal/httpapi/...` — Expected: FAIL, undefined symbols.
 - [ ] **Step 3: Implement `jwt.go`, `response/response.go`, `middleware/auth.go`.**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/identity/... ./internal/httpapi/... -v` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(auth): JWT service, auth middleware, consistent response envelopes`.
+- [ ] **Step 5: Review** — no commit (the requester owns git history).
 
-### Task 4: Identity HTTP handlers
+### Task 4: Identity MySQL adapter and HTTP handlers
 
 **Files:**
+- Create: `app/internal/identity/adapter/mysql/repository.go`, `app/internal/identity/adapter/mysql/repository_test.go`
 - Create: `app/internal/identity/adapter/http/handler.go`, `app/internal/identity/adapter/http/handler_test.go`
 
 **Interfaces:**
-- Consumes: `identity.Service` (Task 2), `response` (Task 3).
+- Consumes: `identity.UserRepository` port + `identity.Service` (Task 2), `response` (Task 3), `*sql.DB` from `database.Open` (Task 1).
 - Produces:
+  - `identitymysql.NewRepository(db *sql.DB) *Repository` implementing `identity.UserRepository`:
+    - `Create` → `INSERT INTO users (name, email, password_hash) VALUES (?,?,?)`, then `LastInsertId`, then re-select by id for `created_at`/`updated_at`.
+    - `GetByEmail` / `GetByID` → `SELECT id, name, email, password_hash, created_at, updated_at FROM users WHERE email = ?` / `WHERE id = ?`.
+    - `mapError(err error) error` (unexported, unit-tested without a DB): `*mysql.MySQLError` with `Number == 1062` → `identity.ErrEmailTaken`; `sql.ErrNoRows` → `identity.ErrUserNotFound`; anything else passes through unchanged so a DB outage stays a 500.
+    - **Why this mapping is the real guard:** the service's duplicate pre-check has a TOCTOU race, so under concurrent registration only the unique index + 1062 mapping turns the collision into 409 instead of 500.
   - `identityhttp.NewHandler(svc *identity.Service) *Handler`
   - `(h *Handler) RegisterAuth(r *gin.RouterGroup)` — registers `POST /register` and `POST /login` (exact paths; pass `r := engine.Group("/")` later in Task 8).
   - Request DTOs decoded with `ShouldBindJSON`; unknown/extra ownership fields are ignored (decode into explicit DTO structs with only expected fields).
   - Responses: register → 201 `{"data": {"id", "name", "email", "created_at"}}` (never `password_hash`); login → 200 `{"data": {"token", "token_type": "Bearer", "expires_in": <seconds>}}`.
 
-- [ ] **Step 1: Write failing httptest tests** (build a minimal `gin.New()` engine in the test):
+- [ ] **Step 1: Write failing tests** — repository error mapping first, then httptest handlers (build a minimal `gin.New()` engine in the test):
+  - `TestRepository_MapError_DuplicateEmail` — `mapError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry ... for key 'uq_users_email'"})` → `identity.ErrEmailTaken`.
+  - `TestRepository_MapError_NoRows` — `mapError(sql.ErrNoRows)` → `identity.ErrUserNotFound`.
+  - `TestRepository_MapError_Other` — an unrelated error is returned unchanged (not wrapped into a business error).
   - `TestRegister_Created_201` — body matches envelope, JSON must not contain "password_hash", status 201.
   - `TestRegister_MalformedJSON_Returns400`.
   - `TestRegister_InvalidFields_Returns400_ValidationError`.
   - `TestRegister_DuplicateEmail_Returns409_Conflict`.
   - `TestLogin_OK_ReturnsToken` — 200, `token_type == "Bearer"`, `expires_in == 86400`.
   - `TestLogin_BadPassword_Returns401_GenericMessage` — message identical to unknown-email case.
-- [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/identity/adapter/http/...` — Expected: FAIL.
-- [ ] **Step 3: Implement `handler.go`** mapping service errors through `response.FromError`.
-- [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/identity/adapter/http/... -v` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(identity): register and login HTTP handlers`.
+- [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/identity/...` — Expected: FAIL (undefined symbols in the new packages).
+- [ ] **Step 3: Implement `repository.go`** (parameterized SQL only; `Create`/`GetByEmail`/`GetByID` route every error through `mapError`) **and `handler.go`** mapping service errors through `response.FromError`.
+- [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/identity/... -v` — Expected: PASS.
+- [ ] **Step 5: Review** — no commit (see Global Constraints: the requester owns git history).
 
 ### Task 5: Posts service — CRUD, ownership, pagination
 
@@ -190,7 +202,7 @@
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/posts/...` — Expected: FAIL.
 - [ ] **Step 3: Implement the posts domain files** to the Produces signatures.
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/posts/... -v` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(posts): post service with ownership enforcement and pagination`.
+- [ ] **Step 5: Review** — no commit (the requester owns git history).
 
 ### Task 6: Posts MySQL adapter and HTTP handler
 
@@ -209,7 +221,7 @@
 
 - [ ] **Step 1: Write failing tests:**
   - `TestRepository_Update_NoChange_ReturnsPost` — fake `sql` driver or stubbed affected-rows=0 path returns the row (Review Focus #2). If driving this through `database/sql` stubs is disproportionate, pin the decision with a driver-level test against the integration harness in Task 9 instead — but the behavior must be pinned by a named test somewhere.
-  - `TestRepository_Create_DuplicateEmail_MapsToErrEmailTaken` equivalent for posts is not applicable; instead `TestRepository_MySQLErrorMapping` (table): MySQL 1452 (FK violation on create) → `ErrNotFound` is comments-only; for posts, 1451/1452 surface as repo errors mapped to 500 — pin `posts` create with bad author returns error (Review Focus #5 is identity's 1062, pinned in Task 9 integration).
+  - `TestRepository_MapError` (table): unrelated MySQL errors pass through unchanged, so an insert with a bad `author_id` surfaces as an error rather than being misreported as a business condition. (Identity's 1062 mapping — Review Focus #5 — is pinned in Task 4; comments' 1452 → `ErrPostNotFound` mapping is pinned in Task 7.)
   - HTTP (httptest, real `posts.Service` over a fake repo):
     - `TestCreatePost_NoAuth_Returns401`
     - `TestCreatePost_Authenticated_Returns201_AuthorFromToken` — request body containing `author_id: 999` is ignored; response `author_id` == token user.
@@ -222,7 +234,7 @@
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/posts/adapter/...` — Expected: FAIL.
 - [ ] **Step 3: Implement `repository.go` and `handler.go`.**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/posts/... -v` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(posts): MySQL adapter and HTTP handlers with ownership checks`.
+- [ ] **Step 5: Review** — no commit (the requester owns git history).
 
 ### Task 7: Comments module — service, ports, MySQL adapter, handler
 
@@ -255,7 +267,7 @@
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/comments/...` — Expected: FAIL.
 - [ ] **Step 3: Implement comments domain, MySQL adapter (`Create` inserts `post_id, author_id, author_name, content`; `ListByPost` selects with `WHERE post_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?` + count), and handler (`POST /posts/:id/comments`, `GET /posts/:id/comments`; create behind `auth`, list public).**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./internal/comments/... -v` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(comments): comment service, adapter, and handlers with author snapshot`.
+- [ ] **Step 5: Review** — no commit (the requester owns git history).
 
 ### Task 8: Composition — router, main, health, graceful shutdown
 
@@ -278,7 +290,7 @@
 - [ ] **Step 2: Run to verify failure.** Run: `cd app && go test ./internal/httpapi/...` — Expected: FAIL.
 - [ ] **Step 3: Implement `router.go` and rewrite `cmd/api/main.go`; delete `app/main.go`.**
 - [ ] **Step 4: Run to verify pass.** Run: `cd app && go test ./... -v` — Expected: PASS, full suite green.
-- [ ] **Step 5: Commit** `feat: application wiring, router, healthz, graceful shutdown`.
+- [ ] **Step 5: Review** — no commit (the requester owns git history).
 
 ### Task 9: Integration tests, Docker, environment
 
@@ -300,7 +312,7 @@
 - [ ] **Step 2: Run them against a MySQL instance.** Run: `cd app && TEST_MYSQL_DSN='...' go test ./tests/integration/... -v` (DSN points at the compose MySQL on `localhost:3333`, or a locally started container). Expected: FAIL first where behavior is unimplemented, then PASS after fixes.
 - [ ] **Step 3: Write Dockerfile + docker-compose.yml; verify `.env.example` keys** (`APP_PORT`, `DB_DSN`, `JWT_SECRET`, `JWT_TTL` — placeholders only).
 - [ ] **Step 4: Build and boot the stack.** Run: `docker-compose build && docker-compose up -d` then `curl localhost:8080/healthz`. Expected: `{"data":{"status":"ok"}}`, `docker-compose ps` shows all three services healthy/completed.
-- [ ] **Step 5: Commit** `feat: integration tests, multi-stage Docker, compose with migration step`.
+- [ ] **Step 5: Review** — no commit (the requester owns git history).
 
 ### Task 10: README, final verification, end-to-end checklist
 
@@ -333,7 +345,7 @@
   10. DELETE post → comments cascaded (GET comments after → 404 or empty per spec'd behavior)
   11. Duplicate register → 409
   12. No `password_hash`, SQL, or DSN text in any response
-- [ ] **Step 4: Commit** `docs: README with architecture, API contract, and design decisions`.
+- [ ] **Step 4: Review** — no commit (the requester owns git history).
 
 ---
 
