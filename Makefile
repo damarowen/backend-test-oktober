@@ -8,7 +8,8 @@ all: build up
 # shell-split, and quoted values (common in .env files) still work.
 DB_DSN ?= $(shell sed -n 's/^DB_DSN=//p' .env 2>/dev/null | head -n1 | tr -d '"' | tr -d "'")
 MIGRATIONS_DIR ?= $(shell sed -n 's/^MIGRATIONS_DIR=//p' .env 2>/dev/null | head -n1 | tr -d '"' | tr -d "'")
-export DB_DSN MIGRATIONS_DIR
+TEST_MYSQL_DSN ?= $(shell sed -n 's/^TEST_MYSQL_DSN=//p' .env 2>/dev/null | head -n1 | tr -d '"' | tr -d "'")
+export DB_DSN MIGRATIONS_DIR TEST_MYSQL_DSN
 
 # Build the Docker containers
 build:
@@ -35,11 +36,13 @@ logs:
 
 # Run Go tests (integration tests skip without TEST_MYSQL_DSN)
 test:
-	cd app && go test -v ./...
+	cd app && go test -v -coverpkg=./internal/... -coverprofile=coverage.out ./internal/... ./cmd/...
+	cd app && go tool cover -func=coverage.out | tail -n 1
 
-# Run the MySQL-backed integration tests against the compose database
+# Run MySQL-backed integration tests against the configured disposable database
 test-integration:
-	cd app && TEST_MYSQL_DSN='root:abc123@tcp(127.0.0.1:3333)/appdb?parseTime=true&charset=utf8mb4' go test -count=1 ./tests/integration/... -v
+	@test -n "$(TEST_MYSQL_DSN)" || { echo "Set TEST_MYSQL_DSN in .env to a disposable test database"; exit 1; }
+	cd app && go test -count=1 ./tests/integration/... -v
 
 # Clean build artifacts and volumes (this project only)
 clean:
