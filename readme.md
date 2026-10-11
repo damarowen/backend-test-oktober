@@ -50,10 +50,18 @@ HTTP Handler → Application Service → Repository Port → MySQL Adapter
   transport helpers; domain packages never import the transport layer.
   `response.FromError` is the only place that knows every module's error
   sentinels.
-- Cross-module needs are expressed as consumer-side ports: the comments module
-  defines `PostChecker` (satisfied by `posts.Service.Exists`) and
-  `UserNameProvider` (satisfied by `identity.Service.UserName`), so it never
-  imports the sibling services.
+- Cross-module calls use consumer-side ports: `comments` defines `PostChecker`
+  and `UserNameProvider`, which `posts.Service` and `identity.Service` satisfy
+  implicitly; `cmd/api` wires them into `comments.NewService`. Calls are
+  synchronous and in-process. `comments` also imports `identity` for its
+  `ErrUserNotFound` sentinel, but does not depend on sibling service types.
+- For future integrations, keep adapters with the module that owns the
+  behavior (for example, `posts/adapter/redis` for a post cache or
+  `posts/adapter/rabbitmq` for publishing post events). Shared client setup can
+  live under `platform/cache` or `platform/messaging`; define module-facing
+  ports in the owning module and wire implementations in `cmd/api`. Redis
+  should complement MySQL as a cache, not silently replace it as the source of
+  truth.
 
 Why a monolith and not microservices: the domain is three tightly related
 entities with one deployment, one database, and one team-sized scope.

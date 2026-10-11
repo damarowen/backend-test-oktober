@@ -27,10 +27,11 @@ const (
 const (
 	MsgValidation   = "The request is invalid."
 	MsgUnauthorized = "Authentication is required."
-	MsgForbidden    = "You do not have permission to perform this action."
-	MsgNotFound     = "The requested resource was not found."
-	MsgConflict     = "The request conflicts with the current state."
-	MsgInternal     = "An internal error occurred."
+	MsgInvalidCredentials= "Invalid credentials, please check email or password and try again."
+	MsgForbidden = "You do not have permission to perform this action."
+	MsgNotFound  = "The requested resource was not found."
+	MsgConflict  = "The request conflicts with the current state."
+	MsgInternal  = "An internal error occurred."
 )
 
 type dataBody struct {
@@ -84,7 +85,7 @@ func FromError(c *gin.Context, err error) bool {
 		APIError(c, http.StatusBadRequest, CodeValidation, validationMessage(err))
 		return true
 	case errors.Is(err, identity.ErrInvalidCredentials):
-		APIError(c, http.StatusUnauthorized, CodeUnauthorized, MsgUnauthorized)
+		APIError(c, http.StatusUnauthorized, CodeUnauthorized, MsgInvalidCredentials)
 		return true
 	case errors.Is(err, posts.ErrForbidden):
 		APIError(c, http.StatusForbidden, CodeForbidden, MsgForbidden)
